@@ -25,6 +25,7 @@ from cf_checkpoint import CFCheckpoint
 from cf_manager import CFManager, CFMode
 from cf_iterator import CFIterator
 
+import config_model
 from torch.multiprocessing import Pool, Process, set_start_method
 try:
      set_start_method('spawn')
@@ -321,6 +322,8 @@ def main():
         print("=> creating model '{}'".format(args.arch))
         if(args.arch == "inception_v3"):
             model = models.__dict__[args.arch](num_classes=args.classes,aux_logits=False)
+        elif args.arch.startswith("vgg") or args.arch.startswith("resnet"):
+            model = config_model.get_model_by_name(args.arch)
         else:
             model = models.__dict__[args.arch](num_classes=args.classes)
 
@@ -456,9 +459,9 @@ def main():
             transforms.Normalize((0.4914, 0.4822, 0.4465),
                                  (0.2023, 0.1994, 0.2010)),
         ])
-        train_dataset = CIFAR10(
+        train_dataset = datasets.CIFAR10(
             root="~/data", train=True, download=True, transform=transform_train)
-        validation_dataset = CIFAR10(
+        validation_dataset = datasets.CIFAR10(
             root="~/data", train=False, download=True, transform=transform_test)
 
         if args.distributed:
@@ -671,7 +674,7 @@ def train(train_loader, model, criterion, optimizer, epoch, df, cf_manager):
         checkpoint_time += chktime  
             #print("After CF chk : mem before={}MB, after={}MB".format(mem_before/1024/1024, mem_after/1024/1024))
 
-        if args.barrier:
+        if args.distributed and args.barrier:
             dist.barrier()
         tottime = time.time() - end
         total_time.update(time.time() - end)
