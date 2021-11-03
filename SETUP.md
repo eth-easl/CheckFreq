@@ -16,13 +16,35 @@ sudo systemctl restart docker
 sudo docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi
 ```
 
-- Pull checkfreq dali image
+- Get the codebase
 ```
-docker pull zhangks98/checkfreq-dali:py36_cu10.run
+git clone https://github.com/zhangks98/CheckFreq.git
+cd CheckFreq && git checkout cifar
+cd -
+```
+
+- Temporary hack for CIFAR-10 dataset
+```
+git clone https://github.com/YoongiKim/CIFAR-10-images.git cifar
+mv cifar/test cifar/val
+sudo mv cifar /
+```
+
+- Pull the `checkfreq-dali` container image
+```
+docker pull zhangks98/checkfreq-dali:hdparm
 ```
 
 - Run the image
 ```
-nvidia-docker run --ipc=host --mount src=/,target=/datadrive/,type=bind -it --rm --network=host --privileged zhangks98/checkfreq-dali:py36_cu10.run
+nvidia-docker run --ipc=host --mount src=/,target=/datadrive/,type=bind -it --rm --network=host --privileged zhangks98/checkfreq-dali:hdparm
+```
+
+- Inside the image:
+```
+mkdir -p /mnt/CheckFreq
+mount --bind /datadrive/home/kaiszhang/CheckFreq /mnt/CheckFreq
+cd /mnt/CheckFreq
+./train_checkfreq.sh
 ```
 
