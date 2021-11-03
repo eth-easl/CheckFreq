@@ -138,7 +138,7 @@ parser.add_argument('--chk-prefix', type=str, default="./")
 parser.add_argument('--checkfreq', action='store_true', default=False)
 parser.add_argument('--cf_iterator', action='store_true', default=False)
 parser.add_argument('--chk_mode_baseline', action='store_true', default=False)
-
+parser.add_argument('--overhead', type=int, default=5, help='maximum overhead (in percentage)')
 
 cudnn.benchmark = True
 
@@ -436,7 +436,7 @@ def main():
         resume_size = int(pipe.epoch_size("Reader") / args.world_size) - args.start_index
         train_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / args.world_size), fill_last_batch=False, resume_size=resume_size)
         if args.cf_iterator:
-            train_loader = CFIterator(train_loader, worker_id=args.local_rank, bs=args.batch_size, steps_this_epoch=int(args.start_index/args.batch_size), epoch=args.start_epoch, dali=args.dali, cf_manager=cf_manager, chk_freq=args.chk_freq, arch=args.arch, steps_to_run=args.steps_per_run, persist=args.persist, dynamic=args.dynamic)
+            train_loader = CFIterator(train_loader, worker_id=args.local_rank, bs=args.batch_size, steps_this_epoch=int(args.start_index/args.batch_size), epoch=args.start_epoch, dali=args.dali, cf_manager=cf_manager, chk_freq=args.chk_freq, arch=args.arch, steps_to_run=args.steps_per_run, persist=args.persist, dynamic=args.dynamic, max_overhead=args.overhead)
             if args.resume:
                 train_loader.load_state_dict(extra_state)
 
