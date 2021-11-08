@@ -155,23 +155,26 @@ class CFIterator:
 	def __next__(self):
 
 		# Profile if required on main worker
+		start = time.time()
 		if self._worker_id == 0 and self._chk_mode == CFMode.AUTO and not self._profile_done:
-				self._profile_iter_count += 1
-				dev = max(0, torch.cuda.current_device())
-				if self._profile_iter_count < 100 and self._profile_iter_count >= 5:
-						print("PROFILE step {}".format(self._profile_iter_count))	
-						self._iter_dur.append(time.time()-self._prev_iter_end)
-						# Change to profile
-						self._mem_util.append(torch.cuda.max_memory_allocated(dev))
-				elif self._profile_iter_count == 100:
-						self._complete_profile(dev)
+			self._profile_iter_count += 1
+			dev = max(0, torch.cuda.current_device())
+			if self._profile_iter_count < 100 and self._profile_iter_count >= 5:
+				print("PROFILE step {}".format(self._profile_iter_count))	
+				self._iter_dur.append(time.time()-self._prev_iter_end)
+				# Change to profile
+				self._mem_util.append(torch.cuda.max_memory_allocated(dev))
+			elif self._profile_iter_count == 100:
+				self._complete_profile(dev)
 						
 		# Checkpoint if required on main worker
 		elif self._worker_id == 0 and self._chk_freq > 0 and self._steps_since_chk == self._chk_freq:
-		#elif self._worker_id == 0 and self._chk_freq > 0 and self._total_steps % self._chk_freq == 0 and self._steps_since_chk == self._chk_freq:
+			#elif self._worker_id == 0 and self._chk_freq > 0 and self._total_steps % self._chk_freq == 0 and self._steps_since_chk == self._chk_freq:
 			print("MUST CHECKPOINT NOW AT ITER {}, steps {}".format(self._steps_this_epoch, self._steps_since_chk))
 			if self._chk_mode == CFMode.MANUAL:
-				self._cf_manager.save(synchronous=True, additional_snapshot=self.state_dict(), persist=self._persist)
+				#self._cf_manager.save(synchronous=False, additional_snapshot=self.state_dict(), persist=self._persist, use_thread=True)
+				self._cf_manager.save_cpu(synchronous=False, additional_snapshot=self.state_dict(), persist=self._persist, use_thread=True)
+
 				#self._cf_manager.save(synchronous=True, additional_snapshot=self.state_dict(), persist=False)
 			else:
 				# Iter-level chk
@@ -188,7 +191,7 @@ class CFIterator:
 			self._monitor_iter_count += 1
 				
 			if self._monitor_iter_count == 1:
-				self.t_start = time.time()
+			        self.t_start = time.time()
 			elif self._monitor_iter_count == self._chk_freq + 1:
 				t_dur = time.time() - self.t_start
 				print("Duration between checkpoints = {:.2f}s".format(t_dur))
@@ -277,6 +280,8 @@ class CFIterator:
 		self._steps_this_run += 1
 		self._steps_since_chk += 1
 
+		end = time.time()
+		print("------------------------ Iteration took: ", end-start)
 		return val
 
 		
@@ -344,6 +349,7 @@ class CFIterator:
 
 			if overhead >= t_g:
 					# Use GPU-snapshot
+					print("-------------- USE GPU SNAPSHOT!!!!!!!!!!!!!!!1")
 					self._chk_fn = getattr(self._cf_manager, "save")
 					#self._use_thread = True
 					#self._use_thread = False

@@ -107,7 +107,8 @@ class CFCheckpoint:
 			return False
 		
 		self.latest_snapshot = OrderedDict()
-	
+		
+		start = time.time()
 		#Snapshot the state of tractable items
 		for name, ref in self.tracking_map.items():
 			if name not in self.latest_snapshot:
@@ -118,7 +119,9 @@ class CFCheckpoint:
 
 		if isinstance(additional_state, Mapping):
 			self.latest_snapshot.update(additional_state)
-				
+		
+		print("----- GPU Deep copy took: ", time.time() - start)		
+
 		return True
 
 	"""
@@ -129,8 +132,8 @@ class CFCheckpoint:
 
 	Call this in a new process to perform in bgk
 	"""	
-	def _serialize_and_persist(
-		self, 
+	def _serialize_and_persist( ## THIS IS ASYNCHRONOUS (creates a process to do it)
+		self,  
 		filepath,
 		snapshot,
 		active_snapshot,
@@ -181,6 +184,7 @@ class CFCheckpoint:
 		epoch_chk = None,
 		overwrite = True):
 
+		# create the snapshot (not deep copy because it is not pipelined?)
 		snap_ptr = {}
 		for name, ref in self.tracking_map.items():
 				snap_ptr[name] = ref.state_dict()
@@ -208,6 +212,7 @@ class CFCheckpoint:
 		filepath, 
 		active_snapshot,
 		in_progress_snapshot,
+		snapshot,
 		lock,
 		snap_ptr,
 		additional_state=None,
@@ -218,12 +223,13 @@ class CFCheckpoint:
 		overwrite = True,
 		profile=False):
 
+		
 		s = time.time()
+		
 		print("[{}] START ASYNC".format(time.time()))
 		if active_snapshot.value == 1:
 			print("ERROR! Snapshot active")
 			return
-
 		#with lock: 
 		#	in_progress_snapshot.value = 1
 
@@ -235,16 +241,16 @@ class CFCheckpoint:
 			snapshot[name] = {}
 			snapshot[name] = _to_cpu(ref)
 		print("Time for CPU snapshot = {}s".format(time.time()-s))
-	
 		with lock:
 			in_progress_snapshot.value = 0
 			active_snapshot.value = 1
+		
 		print("In progress snapshot val = {}".format(in_progress_snapshot.value))
 		print("[{}] START ASYNC PERSIST".format(time.time()))
 
 		if isinstance(additional_state, Mapping):
 			snapshot.update(additional_state)
-
+		
 		if profile:
 			with lock:
 				active_snapshot.value = 0
@@ -268,7 +274,6 @@ class CFCheckpoint:
 				linkpath=linkpath)
 		print("Time to checkpoint = {}s".format(time.time()-s))
 		print("[{}] END ASYNC".format(time.time()))
-
 
 
 	"""

@@ -8,6 +8,7 @@ import copy
 import threading
 import time
 import enum
+from cf_checkpoint import _to_cpu
 from torch.multiprocessing import Pool, Process, set_start_method, Manager, Value, Lock
 try:
 		set_start_method('spawn')
@@ -205,8 +206,11 @@ class CFManager:
 
 				# Once complete, initiate the next checkpoint synchronously
 				self.logger.info("[{}] START SNAPSHOT".format(time.time()))
+				start = time.time()
 				success = self.chk._snapshot(self.active_snapshot.value, additional_state=additional_snapshot)
-
+				end1 = time.time()
+				print("-------------- Snapshot took: ", end1-start)
+				
 				if success:
 					with self.lock:
 						self.active_snapshot.value = 1
@@ -246,10 +250,11 @@ class CFManager:
 				self.logger.info("[{}] RETURN FROM START".format(time.time()))
 				
 				if profile_full:
+						print("----------- Wait for process to finish")
 						self.chk_process.join()
 
 				dur = time.time() -s
-
+				print("----------- Remaining time (after snapshot): ", time.time() - end1)
 				
 				#time.sleep(1)
 				return dur_snap, dur 
@@ -314,7 +319,29 @@ class CFManager:
 					fn = getattr(threading, 'Thread')
 				else:
 					fn = globals()["Process"]	
+
+				#### This is temporary - for cost breakdown
+	                        			
+				#print("In progress snapshot val = {}".format(self.in_progress_snapshot.value))
+			#	snap_ptr = {}
+				# DO CPU snapshot	
+				#snapshot = {}
+				#for name, ref in snap_ptr.items():
+				#	snapshot[name] = {}
+				#	snapshot[name] = _to_cpu(ref)
+				#print("Time for CPU snapshot = {}s".format(time.time()-s))
+			
+				#with self.lock:
+				#	self.in_progress_snapshot.value = 0
+				#	self.active_snapshot.value = 1
+				#print("In progress snapshot val = {}".format(self.in_progress_snapshot.value))
+				#print("[{}] START ASYNC PERSIST".format(time.time()))
+				
+				#### This is temporary - for cost breakdown
+                                
 				print("Function is {}".format(fn))
+                                #snapshot = None
+                                    
 				if not is_epoch:
 					keywords = { \
 						'iter_chk':self.available_chk_iters, \
@@ -322,7 +349,7 @@ class CFManager:
 						'profile': profile_snap }
 					self.chk_process = \
 						fn(target=self.chk._snapshot_and_persist_async,	\
-						args=[filepath, self.active_snapshot, self.in_progress_snapshot, self.lock, snap_ptr], kwargs=keywords)
+						args=[filepath, self.active_snapshot, self.in_progress_snapshot, None, self.lock, snap_ptr], kwargs=keywords)
 				else:
 					keywords = { \
 						'iter_chk':self.available_chk_iters, \
@@ -332,7 +359,7 @@ class CFManager:
 						'profile': profile_snap }
 					self.chk_process = \
 						fn(target=self.chk._snapshot_and_persist_async,\
-						args=[filepath, self.active_snapshot, self.in_progress_snapshot, self.lock, snap_ptr], kwargs=keywords)
+						args=[filepath, self.active_snapshot, self.in_progress_snapshot, None, self.lock, snap_ptr], kwargs=keywords)
 
 				self.chk_process.start()
 		

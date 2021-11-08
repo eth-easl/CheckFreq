@@ -608,8 +608,8 @@ def train(train_loader, model, criterion, optimizer, epoch, df, cf_manager):
             train_loader_len =  int(len(train_loader))
 
         adjust_learning_rate(optimizer, epoch, i, train_loader_len)
-       
-   
+        print("+++++++++++++++++++++ 1. ", time.time() - end)
+        c = time.time()
         if args.prof:
             if i > 10:
                 break
@@ -621,12 +621,16 @@ def train(train_loader, model, criterion, optimizer, epoch, df, cf_manager):
         data_time.update(time.time() - end)
         dataset_time += (time.time() - end)
         compute_start = time.time()
-
+        
+        # print("+++++++++++++++++++++ 2. ", time.time() - c)
 
         # compute output
         output = model(input_var)
         loss = criterion(output, target_var)
-
+        
+        print("++++++++++++++++++++++++++++++++++++++++++++++++++++ 2. ", time.time() - c)
+        d = time.time()
+    
         # measure accuracy and record loss
         prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
 
@@ -640,6 +644,9 @@ def train(train_loader, model, criterion, optimizer, epoch, df, cf_manager):
         losses.update(to_python_float(reduced_loss), images.size(0))
         top1.update(to_python_float(prec1), images.size(0))
         top5.update(to_python_float(prec5), images.size(0))
+
+        #print("++++++++++++++++++++++++++++++++++++++++++++++++++++ 2. ", time.time() - c)
+        #d = time.time()
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -659,9 +666,14 @@ def train(train_loader, model, criterion, optimizer, epoch, df, cf_manager):
         else:
             optimizer.step()
 
+        print("*************************************************************** 3. ", time.time() - d)
+
+
         torch.cuda.synchronize()
         compute_time += (time.time() - compute_start)
         ctime = time.time() - compute_start
+        
+        #print("*************************************************************** 3. ", time.time() - d)
 
  
         proc = []
@@ -674,6 +686,7 @@ def train(train_loader, model, criterion, optimizer, epoch, df, cf_manager):
         if args.distributed and args.barrier:
             dist.barrier()
         tottime = time.time() - end
+        #print("--------------------- tottime: ", tottime)
         total_time.update(time.time() - end)
         df.write("{},{},{}\n".format(epoch, i, tottime))
 
