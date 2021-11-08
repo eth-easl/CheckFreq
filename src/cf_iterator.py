@@ -65,13 +65,21 @@ class CFIterator:
 		self._dynamic = dynamic
 		# default MANUAL determine frequency
 		self._chk_mode = CFMode.MANUAL
+                
+		# new - used to breakdown checkpoint stall
+		self.noop = False
+		self.pipeio = True
+		self.at_gpu = True
 
 		# Have we already profiled for ideal chk freq
 		self._profile_done = False
 
 		if self._cf_manager is not None:
 			self._chk_mode = self._cf_manager.mode
-		
+			self.noop = self._cf_manager.noop
+			self.pipeio = self._cf_manager.pipeio
+			self.at_gpu = self._cf_manager.at_gpu
+
 		if self._worker_id == 0:
 			if self._chk_mode == CFMode.MANUAL and self._chk_freq == 0:
 				print("No iter level checkpointing chosen in MANUAL mode")
@@ -172,8 +180,18 @@ class CFIterator:
 			#elif self._worker_id == 0 and self._chk_freq > 0 and self._total_steps % self._chk_freq == 0 and self._steps_since_chk == self._chk_freq:
 			print("MUST CHECKPOINT NOW AT ITER {}, steps {}".format(self._steps_this_epoch, self._steps_since_chk))
 			if self._chk_mode == CFMode.MANUAL:
-				#self._cf_manager.save(synchronous=False, additional_snapshot=self.state_dict(), persist=self._persist, use_thread=True)
-				self._cf_manager.save_cpu(synchronous=False, additional_snapshot=self.state_dict(), persist=self._persist, use_thread=True)
+				if self.at_gpu:
+					if self.noop:    
+						self._cf_manager.save(synchronous=True, additional_snapshot=self.state_dict(), persist=self._persist)
+					else:
+						self._cf_manager.save(synchronous=False, additional_snapshot=self.state_dict(), persist=self._persist, use_thread=True)
+				else:
+					if self.noop:
+						self._cf_manager.save_cpu(synchronous=True, additional_snapshot=self.state_dict(), persist=self._persist, pipesnap=False)
+					elif self.pipeio:
+						self._cf_manager.save_cpu(synchronous=False, additional_snapshot=self.state_dict(), persist=self._persist, pipesnap=False, use_thread=True)
+					else:
+						self._cf_manager.save_cpu(synchronous=False, additional_snapshot=self.state_dict(), persist=self._persist, pipesnap=True, use_thread=True)
 
 				#self._cf_manager.save(synchronous=True, additional_snapshot=self.state_dict(), persist=False)
 			else:

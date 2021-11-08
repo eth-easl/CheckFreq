@@ -95,6 +95,9 @@ class CFManager:
 				keep_epoch_chk = True,
 				overwrite = True,
 				mode = CFMode.AUTO,
+				at_gpu = True,
+				noop = False,
+				pipeio = True,
 				chk_prefix = 'model_v_'):
 
 				self.logger = logging.getLogger(__name__)
@@ -107,6 +110,11 @@ class CFManager:
 				self.chk_epoch_subdir = 'epoch'
 				self.mp_manager = Manager()
 				self.snapshot_copy = None
+
+				# used with the 'MANUAL' mode, for cost breakdown
+				self.at_gpu = at_gpu
+				self.pipeio = pipeio
+				self.noop = noop
 
 				self.cpu_side = False	
 				# Active snapshot, if true, don't snapshot again
@@ -267,6 +275,7 @@ class CFManager:
 			is_epoch=False, \
 			epoch=0, \
 			synchronous=False, \
+			pipesnap=True,
 			persist=False,
 			profile_snap=False,
 			profile_full=False,
@@ -310,7 +319,8 @@ class CFManager:
 				self.logger.info("[{}] START SAVE CALL".format(time.time()))
 
 				if synchronous:
-					self.chk._snapshot_and_persist_async(filepath, self.active_snapshot, self.in_progress_snapshot, self.lock, snap_ptr, iter_chk=self.available_chk_iters, overwrite=self.overwrite)
+					
+					self.chk._snapshot_and_persist_async(filepath, self.active_snapshot, self.in_progress_snapshot, snapshot, self.lock, snap_ptr, iter_chk=self.available_chk_iters, overwrite=self.overwrite)
 					self.logger.info("Returned from save in {:.2f}s".format(time.time()-s))
 					self.logger.info("[{}] END SAVE".format(time.time()))
 					return 
@@ -321,22 +331,22 @@ class CFManager:
 					fn = globals()["Process"]	
 
 				#### This is temporary - for cost breakdown
-	                        			
-				#print("In progress snapshot val = {}".format(self.in_progress_snapshot.value))
-			#	snap_ptr = {}
-				# DO CPU snapshot	
-				#snapshot = {}
-				#for name, ref in snap_ptr.items():
-				#	snapshot[name] = {}
-				#	snapshot[name] = _to_cpu(ref)
-				#print("Time for CPU snapshot = {}s".format(time.time()-s))
+	                        
+				snapshot={}
+				if pipesnap==False:
+					print("In progress snapshot val = {}".format(self.in_progress_snapshot.value))
+				    # DO CPU snapshot	
+					for name, ref in snap_ptr.items():
+						snapshot[name] = {}
+						snapshot[name] = _to_cpu(ref)
+					print("Time for CPU snapshot = {}s".format(time.time()-s))
 			
-				#with self.lock:
-				#	self.in_progress_snapshot.value = 0
-				#	self.active_snapshot.value = 1
-				#print("In progress snapshot val = {}".format(self.in_progress_snapshot.value))
-				#print("[{}] START ASYNC PERSIST".format(time.time()))
-				
+					with self.lock:
+						self.in_progress_snapshot.value = 0
+						self.active_snapshot.value = 1
+					print("In progress snapshot val = {}".format(self.in_progress_snapshot.value))
+					print("[{}] START ASYNC PERSIST".format(time.time()))
+					
 				#### This is temporary - for cost breakdown
                                 
 				print("Function is {}".format(fn))
@@ -349,7 +359,7 @@ class CFManager:
 						'profile': profile_snap }
 					self.chk_process = \
 						fn(target=self.chk._snapshot_and_persist_async,	\
-						args=[filepath, self.active_snapshot, self.in_progress_snapshot, None, self.lock, snap_ptr], kwargs=keywords)
+						args=[filepath, self.active_snapshot, self.in_progress_snapshot, snapshot, self.lock, snap_ptr], kwargs=keywords)
 				else:
 					keywords = { \
 						'iter_chk':self.available_chk_iters, \
@@ -359,7 +369,7 @@ class CFManager:
 						'profile': profile_snap }
 					self.chk_process = \
 						fn(target=self.chk._snapshot_and_persist_async,\
-						args=[filepath, self.active_snapshot, self.in_progress_snapshot, None, self.lock, snap_ptr], kwargs=keywords)
+						args=[filepath, self.active_snapshot, self.in_progress_snapshot, snapshot, self.lock, snap_ptr], kwargs=keywords)
 
 				self.chk_process.start()
 		

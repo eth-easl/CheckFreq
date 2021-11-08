@@ -226,27 +226,27 @@ class CFCheckpoint:
 		
 		s = time.time()
 		
-		print("[{}] START ASYNC".format(time.time()))
-		if active_snapshot.value == 1:
-			print("ERROR! Snapshot active")
-			return
 		#with lock: 
 		#	in_progress_snapshot.value = 1
+		if not snapshot:
 
-		print("In progress snapshot val = {}".format(in_progress_snapshot.value))
-	#	snap_ptr = {}
-		# DO CPU snapshot	
-		snapshot = {}
-		for name, ref in snap_ptr.items():
-			snapshot[name] = {}
-			snapshot[name] = _to_cpu(ref)
-		print("Time for CPU snapshot = {}s".format(time.time()-s))
-		with lock:
-			in_progress_snapshot.value = 0
-			active_snapshot.value = 1
+			print("[{}] START ASYNC".format(time.time()))
+			if active_snapshot.value == 1:
+				print("ERROR! Snapshot active")
+				return
+			
+			print("In progress snapshot val = {}".format(in_progress_snapshot.value))
+			# DO CPU snapshot	
+			for name, ref in snap_ptr.items():
+				snapshot[name] = {}
+				snapshot[name] = _to_cpu(ref)
+			print("Time for CPU snapshot = {}s".format(time.time()-s))
+			with lock:
+				in_progress_snapshot.value = 0
+				active_snapshot.value = 1
 		
-		print("In progress snapshot val = {}".format(in_progress_snapshot.value))
-		print("[{}] START ASYNC PERSIST".format(time.time()))
+			print("In progress snapshot val = {}".format(in_progress_snapshot.value))
+			print("[{}] START ASYNC PERSIST".format(time.time()))
 
 		if isinstance(additional_state, Mapping):
 			snapshot.update(additional_state)
@@ -255,6 +255,7 @@ class CFCheckpoint:
 			with lock:
 				active_snapshot.value = 0
 			return
+
 
 		torch.save(snapshot, filepath)
 

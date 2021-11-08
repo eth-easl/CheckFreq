@@ -140,6 +140,11 @@ parser.add_argument('--cf_iterator', action='store_true', default=False)
 parser.add_argument('--chk_mode_baseline', action='store_true', default=False)
 parser.add_argument('--overhead', type=int, default=5, help='maximum overhead (in percentage)')
 
+# for cost breakdown
+parser.add_argument('--at_gpu', action='store_true', default=False)
+parser.add_argument('--noop', action='store_true', default=False)
+parser.add_argument('--pipeio', action='store_true', default=False) 
+
 cudnn.benchmark = True
 
 must_chk = False
@@ -374,7 +379,7 @@ def main():
 
     #if args.local_rank == 0:
     chk = CFCheckpoint(model=model, optimizer=optimizer)
-    cf_manager = CFManager(args.chk_prefix, chk, mode=args.chk_mode)
+    cf_manager = CFManager(args.chk_prefix, chk, mode=args.chk_mode, at_gpu=args.at_gpu, noop=args.noop, pipeio=args.pipeio)
     #else:
     #    cf_manager = None
 
@@ -608,8 +613,6 @@ def train(train_loader, model, criterion, optimizer, epoch, df, cf_manager):
             train_loader_len =  int(len(train_loader))
 
         adjust_learning_rate(optimizer, epoch, i, train_loader_len)
-        print("+++++++++++++++++++++ 1. ", time.time() - end)
-        c = time.time()
         if args.prof:
             if i > 10:
                 break
@@ -622,14 +625,11 @@ def train(train_loader, model, criterion, optimizer, epoch, df, cf_manager):
         dataset_time += (time.time() - end)
         compute_start = time.time()
         
-        # print("+++++++++++++++++++++ 2. ", time.time() - c)
 
         # compute output
         output = model(input_var)
         loss = criterion(output, target_var)
         
-        print("++++++++++++++++++++++++++++++++++++++++++++++++++++ 2. ", time.time() - c)
-        d = time.time()
     
         # measure accuracy and record loss
         prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
@@ -645,8 +645,6 @@ def train(train_loader, model, criterion, optimizer, epoch, df, cf_manager):
         top1.update(to_python_float(prec1), images.size(0))
         top5.update(to_python_float(prec5), images.size(0))
 
-        #print("++++++++++++++++++++++++++++++++++++++++++++++++++++ 2. ", time.time() - c)
-        #d = time.time()
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -666,15 +664,11 @@ def train(train_loader, model, criterion, optimizer, epoch, df, cf_manager):
         else:
             optimizer.step()
 
-        print("*************************************************************** 3. ", time.time() - d)
-
 
         torch.cuda.synchronize()
         compute_time += (time.time() - compute_start)
         ctime = time.time() - compute_start
         
-        #print("*************************************************************** 3. ", time.time() - d)
-
  
         proc = []
         ttime = time.time() - end   
