@@ -27,4 +27,5 @@ for ovh in {0,1,5,10,15,20}; do
   python -m torch.distributed.launch --nproc_per_node=4 models/image_classification/pytorch-imagenet-cf.py --dali -a vgg16 -b 64 --workers 3 --epochs 3  --deterministic --noeval --barrier --checkfreq --chk-prefix ./chk/ --cf_iterator --overhead $ovh --data /datadrive/cifar > stdout.out 2>&1
 
   mv stdout.out time-split*.csv acc-progress*.csv $res_dir
+  git clean -fd
 done
