@@ -18,7 +18,7 @@ sudo docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi
 
 - Get the codebase
 ```
-git clone https://github.com/zhangks98/CheckFreq.git
+git clone https://github.com/eth-easl/CheckFreq.git
 cd CheckFreq && git checkout cifar
 cd -
 ```
