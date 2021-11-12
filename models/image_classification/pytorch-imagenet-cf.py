@@ -570,9 +570,9 @@ def main():
     dur_full = time.time() - start_full
     if args.local_rank == 0:
         print("Total time for all epochs = {}".format(dur_full))   
-        if cf_manager.chk_process is not None:
-            cf_manager.chk_process.join() 
-    
+        if cf_manager.chk_process_epoch is not None:
+            cf_manager.chk_process_epoch.join() 
+        cf_manager.join_proc()
 
     if args.dali:
         del pipe

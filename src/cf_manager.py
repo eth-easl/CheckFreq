@@ -486,6 +486,15 @@ class CFManager:
 
 			return fname
 
+		def join_proc(self):
+			if self.chk_process is not None:
+                        # There is an checkpoint underway. Wait
+				if self.chk_process.is_alive():
+					pid = self.chk_process.pid
+					while (self.chk_process.is_alive()):
+						os.system("kill -9 " + str(pid))
+					print("-------------- Killed!")
+
 
 		def _get_full_path(self, fname, epoch=False):
 				if not epoch:
