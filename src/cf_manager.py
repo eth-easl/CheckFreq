@@ -128,6 +128,8 @@ class CFManager:
 				# cannot start unless the previous one completes
 				self.chk_process = None
 				self.spawned = False
+				self.chk_process_epoch = None # for simplicity: use a different function for epoch checkp
+
 				# `overwrite` supersedes if False
 				if self.overwrite is False and self.keep_epoch_chk is False:
 						self.keep_epoch_chk = True
@@ -150,6 +152,7 @@ class CFManager:
 				self.change = Value('i', 0)					
 				self.snap_ptr = {} #self.mp_manager.dict()
 				self.filepath = Value(ctypes.c_wchar_p, "")
+				self.additional_snapshot = self.mp_manager.dict()
 
 			
 		"""
@@ -293,6 +296,11 @@ class CFManager:
 				chk_fname = self.chk_prefix + str(self.chk_global_id)
 				filepath = self._get_full_path(chk_fname)
 				
+				if additional_snapshot:
+					for name,ref in additional_snapshot.items():
+						self.additional_snapshot[name] = ref
+				else:
+					self.additional_snapshot.clear()
 				if is_epoch:
 						chk_fname_link = self.chk_prefix + str(self.chk_global_id) + '_' +str(epoch) 
 						filepath_link = self._get_full_path(chk_fname, epoch=True)
@@ -300,10 +308,10 @@ class CFManager:
 				self.logger.info("Writing chk {} at {}".format(self.chk_global_id, filepath))
 
 				# Check if there's an ongoing checkpoint operation
-				#if self.chk_process is not None:
-				#		# There is an checkpoint underway. Wait
-				#		if self.chk_process.is_alive():
-				#				self.chk_process.join()
+				if self.chk_process_epoch is not None:
+						# There is an checkpoint underway. Wait
+						if self.chk_process_epoch.is_alive():
+								self.chk_process_epoch.join()
 
 				self.logger.info("Starting next snapshot {:.2f}s".format(time.time()-s))
 
@@ -323,12 +331,12 @@ class CFManager:
 				with self.lock:
 					self.in_progress_snapshot.value = 1
 
-				print(filepath)
+
 				self.logger.info("[{}] START SAVE CALL".format(time.time()))
 
 				if synchronous:
 					
-					self.chk._snapshot_and_persist_async(filepath, self.active_snapshot, self.in_progress_snapshot, snapshot, self.lock, snap_ptr, iter_chk=self.available_chk_iters, overwrite=self.overwrite)
+					self.chk._snapshot_and_persist_async(filepath, self.active_snapshot, self.in_progress_snapshot, snapshot, self.lock, snap_ptr, background=False, iter_chk=self.available_chk_iters, overwrite=self.overwrite)
 					self.logger.info("Returned from save in {:.2f}s".format(time.time()-s))
 					self.logger.info("[{}] END SAVE".format(time.time()))
 					return 
@@ -338,7 +346,7 @@ class CFManager:
 				else:
 					fn = globals()["Process"]	
 
-				print("------------------- fn: ", fn)
+				
 
 				#### This is temporary - for cost breakdown
 	                        
@@ -346,59 +354,66 @@ class CFManager:
 				if pipesnap==False:
 					print("In progress snapshot val = {}".format(self.in_progress_snapshot.value))
 				    # DO CPU snapshot	
-					for name, ref in snap_ptr.items():
+					for name, ref in self.snap_ptr.items():
 						snapshot[name] = {}
 						snapshot[name] = _to_cpu(ref)
 					print("Time for CPU snapshot = {}s".format(time.time()-s))
 			
 					with self.lock:
 						self.in_progress_snapshot.value = 0
-						self.active_snapshot.value = 1
-					print("In progress snapshot val = {}".format(self.in_progress_snapshot.value))
-					print("[{}] START ASYNC PERSIST".format(time.time()))
-					
+						self.active_snapshot.value = 1 
+
+					#print("In progress snapshot val = {}".format(self.in_progress_snapshot.value))
+					#print("[{}] START ASYNC PERSIST".format(time.time()))
+
+					############## For debugging ##############
+					torch.save(snapshot, "chk/cp_master.chk")
+					f = open("chk/cp_master.chk", 'a+')
+					os.fsync(f.fileno())
+					f.close()
+
+					with self.lock:
+						self.in_progress_snapshot.value = 1					
+                                        ############## For debugging ##############
+
 				#### This is temporary - for cost breakdown
                                 
 				print("Function is {}".format(fn))
                                 #snapshot = None
                                  
 				with self.lock:
-					print("-------------------------- ", self.snap_ptr['model']['classifier.6.bias'])
 					self.change.value = 1
 				if self.spawned:
 					print("PID: ", self.chk_process.pid)
 
 				if not is_epoch:
 					keywords = { \
+						'background': True, \
 						'iter_chk':self.available_chk_iters, \
 						'overwrite':self.overwrite, \
 						'profile': profile_snap }
 					if not self.spawned:
 						self.chk_process = \
 							fn(target=self.chk._snapshot_and_persist_async,	\
-							args=[filepath, self.active_snapshot, self.in_progress_snapshot, snapshot, self.lock, self.snap_ptr, self.change], kwargs=keywords)
+							args=[filepath, self.active_snapshot, self.in_progress_snapshot, {}, self.lock, self.snap_ptr, self.change, self.additional_snapshot], kwargs=keywords)
 						self.chk_process.start()
 						self.spawned = True
-					#print("reached here!!!!!!!!")
-					#ret = self.chk._snapshot_and_persist_async.remote(filepath, self.active_snapshot, self.in_progress_snapshot, snapshot, None, snap_ptr)
 
 				else:
+					print("-------------- EPOCH CHECKP -----------")
 					keywords = { \
+						'background': False, \
 						'iter_chk':self.available_chk_iters, \
 						'overwrite':self.overwrite, \
 						'epoch_chk':self.available_chk_epochs,\
 						'linkpath': filepath_link, \
 						'profile': profile_snap }
-					self.chk_process = \
+					self.chk_process_epoch = \
 						fn(target=self.chk._snapshot_and_persist_async,\
-						args=[filepath, self.active_snapshot, self.in_progress_snapshot, snapshot, self.lock, snap_ptr], kwargs=keywords)
+						args=[filepath, self.active_snapshot, self.in_progress_snapshot, snapshot, self.lock, self.snap_ptr, 1, self.additional_snapshot], kwargs=keywords)
 
 
-					#print("reached here!")
-					#ret = self.chk._snapshot_and_persist_async.remote(filepath, self.active_snapshot, self.in_progress_snapshot, snapshot, self.lock, snap_ptr)
-
-				#print("------------------ Current time is: ", time.time()-s)
-				#self.chk_process.start()
+					self.chk_process_epoch.start()
 				
 				if profile_snap or profile_full:
 						self.chk_process.join()

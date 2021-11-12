@@ -219,6 +219,7 @@ class CFCheckpoint(object):
 		snap_ptr,
 		change,
 		additional_state=None,
+		background=False,
 		persist=True,
 		linkpath=None,
 		iter_chk = None,
@@ -228,41 +229,24 @@ class CFCheckpoint(object):
 
 		
 		s = time.time()
-		
-		#with lock: 
-		#	in_progress_snapshot.value = 1
-		#st = torch.cuda.Stream()
-		#torch.cuda.stream(st)
-
-		#snapshot = {}
 		#time.sleep(1)
 		start = time.time()
-		'''
-		a = 2.0
-		while(time.time() - start < 1):
-			a = a/2
-			a = a*2
-		
-		with lock:
-			in_progress_snapshot.value = 0
-			active_snapshot.value = 1
-		'''
 
-		i=0
+		i=0 # TODO: enable filepath being passed as arg
 		pref = filepath[:-5]
 		while True:
-			with lock:
-				if change.value==0:		
-					#print("---------- I am stuck!")
-					continue	
 
-			print("-------------- GEIA SOU!")
+			if background:
+				with lock:
+					if change.value==0:		
+						#print("---------- I am stuck!")
+						continue	
+
 			if not snap_ptr:
 				with lock:
 					in_progress_snapshot.value = 0
 
 			if not snapshot:
-				print("------------- hey")
 				print("[{}] START ASYNC".format(time.time()))
 				if active_snapshot.value == 1:
 					print("ERROR! Snapshot active")
@@ -270,8 +254,7 @@ class CFCheckpoint(object):
 				
 				print("In progress snapshot val = {}".format(in_progress_snapshot.value))
 				# DO CPU snapshot	
-				print("-------------------------- ", snap_ptr['model']['classifier.6.bias'])
-				
+				keys = list(snap_ptr['optimizer']['state'].keys())
 				for name, ref in snap_ptr.items():
 					snapshot[name] = {}
 					snapshot[name] = _to_cpu(ref)
@@ -280,12 +263,15 @@ class CFCheckpoint(object):
 					in_progress_snapshot.value = 0
 					active_snapshot.value = 1
 
+
+
 				print("Time for CPU snapshot = {}s".format(time.time()-s))
 
 				print("In progress snapshot val = {}".format(in_progress_snapshot.value))
 				print("[{}] START ASYNC PERSIST".format(time.time()))
 
-			if isinstance(additional_state, Mapping):
+
+			if additional_state:
 				snapshot.update(additional_state)
 			
 			if profile:
@@ -294,14 +280,12 @@ class CFCheckpoint(object):
 				return
 
 
-			print("------------------------------------------------------------------------ filepath value: ", filepath)
 			torch.save(snapshot, filepath)
 
 			with lock:
 				active_snapshot.value = 0
 
 			# Ensure its persisted
-			# print("-------------------- Filepath: ", filepath)
 			f = open(filepath, 'a+')
 			os.fsync(f.fileno())
 			f.close()
@@ -316,10 +300,15 @@ class CFCheckpoint(object):
 			print("Time to checkpoint = {}s".format(time.time()-s))
 			print("[{}] END ASYNC".format(time.time()))
 
+			if not background:
+				print("------------------------------------- TEMPORARY, exit now -----------------------------------")
+				return	
+
 			with lock:
 				snapshot={}
 				change.value=0
 
+			
 			i+=1
 			filepath = pref + str(i) + ".chk"
 

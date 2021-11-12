@@ -1,3 +1,11 @@
+## Note for this branch:
+This branch contains some changes that enable having a background process doing snapshot and persisting, instead of creating a new process every time. For that purpose, the [torch.multiprossing]() module is used, that enable sharing tesnsors between processes. Other variables (such as flags, dictionaries, etc.) are passed using the Value and Manager objects.
+
+Note the following:
+* This code enables having a running background process only for CPU so far.
+* It has not been tested with profiling mode, so use it only with the MANUAL mode.
+
+
 # CheckFreq: Frequent, Fine-Grained DNN Checkpointing
 
 This repository contains the source code implementation of the FAST'21 paper "CheckFreq: Frequent, Fine-Grained DNN Checkpointing". This work was done as part of  Microsoft Research's [Project Fiddle](https://www.microsoft.com/en-us/research/project/fiddle/). This source code is available under the [MIT License](LICENSE.txt).
