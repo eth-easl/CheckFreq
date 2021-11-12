@@ -6,6 +6,7 @@ import copy
 from collections import OrderedDict
 from collections.abc import Mapping
 import time
+#import ray
 """
 Checkpointing and restoring logic
 
@@ -42,8 +43,8 @@ persisted.
 CFManager (such as DL state), global chk ID, etc
 
 """
-
-class CFCheckpoint:
+#@ray.remote
+class CFCheckpoint(object):
 
 	def __init__(
 		self,
@@ -207,6 +208,7 @@ class CFCheckpoint:
 				linkpath=linkpath)
 
 
+	#@ray.remote
 	def _snapshot_and_persist_async(
 		self,
 		filepath, 
@@ -215,6 +217,7 @@ class CFCheckpoint:
 		snapshot,
 		lock,
 		snap_ptr,
+		change,
 		additional_state=None,
 		persist=True,
 		linkpath=None,
@@ -228,54 +231,97 @@ class CFCheckpoint:
 		
 		#with lock: 
 		#	in_progress_snapshot.value = 1
-		if not snapshot:
+		#st = torch.cuda.Stream()
+		#torch.cuda.stream(st)
 
-			print("[{}] START ASYNC".format(time.time()))
-			if active_snapshot.value == 1:
-				print("ERROR! Snapshot active")
-				return
-			
-			print("In progress snapshot val = {}".format(in_progress_snapshot.value))
-			# DO CPU snapshot	
-			for name, ref in snap_ptr.items():
-				snapshot[name] = {}
-				snapshot[name] = _to_cpu(ref)
-			print("Time for CPU snapshot = {}s".format(time.time()-s))
+		#snapshot = {}
+		#time.sleep(1)
+		start = time.time()
+		'''
+		a = 2.0
+		while(time.time() - start < 1):
+			a = a/2
+			a = a*2
+		
+		with lock:
+			in_progress_snapshot.value = 0
+			active_snapshot.value = 1
+		'''
+
+		i=0
+		pref = filepath[:-5]
+		while True:
 			with lock:
-				in_progress_snapshot.value = 0
-				active_snapshot.value = 1
-		
-			print("In progress snapshot val = {}".format(in_progress_snapshot.value))
-			print("[{}] START ASYNC PERSIST".format(time.time()))
+				if change.value==0:		
+					#print("---------- I am stuck!")
+					continue	
 
-		if isinstance(additional_state, Mapping):
-			snapshot.update(additional_state)
-		
-		if profile:
+			print("-------------- GEIA SOU!")
+			if not snap_ptr:
+				with lock:
+					in_progress_snapshot.value = 0
+
+			if not snapshot:
+				print("------------- hey")
+				print("[{}] START ASYNC".format(time.time()))
+				if active_snapshot.value == 1:
+					print("ERROR! Snapshot active")
+					return
+				
+				print("In progress snapshot val = {}".format(in_progress_snapshot.value))
+				# DO CPU snapshot	
+				print("-------------------------- ", snap_ptr['model']['classifier.6.bias'])
+				
+				for name, ref in snap_ptr.items():
+					snapshot[name] = {}
+					snapshot[name] = _to_cpu(ref)
+				#print("Time for CPU snapshot = {}s".format(time.time()-s))
+				with lock:
+					in_progress_snapshot.value = 0
+					active_snapshot.value = 1
+
+				print("Time for CPU snapshot = {}s".format(time.time()-s))
+
+				print("In progress snapshot val = {}".format(in_progress_snapshot.value))
+				print("[{}] START ASYNC PERSIST".format(time.time()))
+
+			if isinstance(additional_state, Mapping):
+				snapshot.update(additional_state)
+			
+			if profile:
+				with lock:
+					active_snapshot.value = 0
+				return
+
+
+			print("------------------------------------------------------------------------ filepath value: ", filepath)
+			torch.save(snapshot, filepath)
+
 			with lock:
 				active_snapshot.value = 0
-			return
 
+			# Ensure its persisted
+			# print("-------------------- Filepath: ", filepath)
+			f = open(filepath, 'a+')
+			os.fsync(f.fileno())
+			f.close()
+			
+			update_stats(
+					filepath,
+					iter_chk=iter_chk,
+					overwrite=overwrite,
+					epoch_chk = epoch_chk,
+					linkpath=linkpath)
+			
+			print("Time to checkpoint = {}s".format(time.time()-s))
+			print("[{}] END ASYNC".format(time.time()))
 
-		torch.save(snapshot, filepath)
+			with lock:
+				snapshot={}
+				change.value=0
 
-		with lock:
-			active_snapshot.value = 0
-
-		# Ensure its persisted
-		f = open(filepath, 'a+')
-		os.fsync(f.fileno())
-		f.close()
-		
-		update_stats(
-				filepath,
-				iter_chk=iter_chk,
-				overwrite=overwrite,
-				epoch_chk = epoch_chk,
-				linkpath=linkpath)
-		print("Time to checkpoint = {}s".format(time.time()-s))
-		print("[{}] END ASYNC".format(time.time()))
-
+			i+=1
+			filepath = pref + str(i) + ".chk"
 
 	"""
 	Restores the checkpoint at given path

@@ -9,6 +9,7 @@ import threading
 import time
 import enum
 from cf_checkpoint import _to_cpu
+import ctypes
 from torch.multiprocessing import Pool, Process, set_start_method, Manager, Value, Lock
 try:
 		set_start_method('spawn')
@@ -126,7 +127,7 @@ class CFManager:
 				# Can be only one at any instant. A new checkpoint
 				# cannot start unless the previous one completes
 				self.chk_process = None
-
+				self.spawned = False
 				# `overwrite` supersedes if False
 				if self.overwrite is False and self.keep_epoch_chk is False:
 						self.keep_epoch_chk = True
@@ -144,8 +145,13 @@ class CFManager:
 				self.logger.info("Available checkpoints : ")
 				for item in self.available_chk_iters:
 					self.logger.info(item)
-					
 
+
+				self.change = Value('i', 0)					
+				self.snap_ptr = {} #self.mp_manager.dict()
+				self.filepath = Value(ctypes.c_wchar_p, "")
+
+			
 		"""
 		The API to be used by the training code to initiate
 		checkpoint.
@@ -286,6 +292,7 @@ class CFManager:
 				self.chk_global_id += 1
 				chk_fname = self.chk_prefix + str(self.chk_global_id)
 				filepath = self._get_full_path(chk_fname)
+				
 				if is_epoch:
 						chk_fname_link = self.chk_prefix + str(self.chk_global_id) + '_' +str(epoch) 
 						filepath_link = self._get_full_path(chk_fname, epoch=True)
@@ -293,19 +300,19 @@ class CFManager:
 				self.logger.info("Writing chk {} at {}".format(self.chk_global_id, filepath))
 
 				# Check if there's an ongoing checkpoint operation
-				if self.chk_process is not None:
-						# There is an checkpoint underway. Wait
-						if self.chk_process.is_alive():
-								self.chk_process.join()
+				#if self.chk_process is not None:
+				#		# There is an checkpoint underway. Wait
+				#		if self.chk_process.is_alive():
+				#				self.chk_process.join()
 
 				self.logger.info("Starting next snapshot {:.2f}s".format(time.time()-s))
 
 				# Once complete, initiate the next checkpoint synchronously
 				self.logger.info("[{}] SAVE FN SNAP NOW".format(time.time()))
 
-				snap_ptr = {}
+				#snap_ptr = {}
 				for name, ref in self.chk.tracking_map.items():
-					snap_ptr[name] = ref.state_dict()
+					self.snap_ptr[name] = ref.state_dict()
 
 
 				# check current snapshot status
@@ -316,6 +323,7 @@ class CFManager:
 				with self.lock:
 					self.in_progress_snapshot.value = 1
 
+				print(filepath)
 				self.logger.info("[{}] START SAVE CALL".format(time.time()))
 
 				if synchronous:
@@ -329,6 +337,8 @@ class CFManager:
 					fn = getattr(threading, 'Thread')
 				else:
 					fn = globals()["Process"]	
+
+				print("------------------- fn: ", fn)
 
 				#### This is temporary - for cost breakdown
 	                        
@@ -351,15 +361,27 @@ class CFManager:
                                 
 				print("Function is {}".format(fn))
                                 #snapshot = None
-                                    
+                                 
+				with self.lock:
+					print("-------------------------- ", self.snap_ptr['model']['classifier.6.bias'])
+					self.change.value = 1
+				if self.spawned:
+					print("PID: ", self.chk_process.pid)
+
 				if not is_epoch:
 					keywords = { \
 						'iter_chk':self.available_chk_iters, \
 						'overwrite':self.overwrite, \
 						'profile': profile_snap }
-					self.chk_process = \
-						fn(target=self.chk._snapshot_and_persist_async,	\
-						args=[filepath, self.active_snapshot, self.in_progress_snapshot, snapshot, self.lock, snap_ptr], kwargs=keywords)
+					if not self.spawned:
+						self.chk_process = \
+							fn(target=self.chk._snapshot_and_persist_async,	\
+							args=[filepath, self.active_snapshot, self.in_progress_snapshot, snapshot, self.lock, self.snap_ptr, self.change], kwargs=keywords)
+						self.chk_process.start()
+						self.spawned = True
+					#print("reached here!!!!!!!!")
+					#ret = self.chk._snapshot_and_persist_async.remote(filepath, self.active_snapshot, self.in_progress_snapshot, snapshot, None, snap_ptr)
+
 				else:
 					keywords = { \
 						'iter_chk':self.available_chk_iters, \
@@ -371,8 +393,13 @@ class CFManager:
 						fn(target=self.chk._snapshot_and_persist_async,\
 						args=[filepath, self.active_snapshot, self.in_progress_snapshot, snapshot, self.lock, snap_ptr], kwargs=keywords)
 
-				self.chk_process.start()
-		
+
+					#print("reached here!")
+					#ret = self.chk._snapshot_and_persist_async.remote(filepath, self.active_snapshot, self.in_progress_snapshot, snapshot, self.lock, snap_ptr)
+
+				#print("------------------ Current time is: ", time.time()-s)
+				#self.chk_process.start()
+				
 				if profile_snap or profile_full:
 						self.chk_process.join()
 
@@ -456,12 +483,13 @@ class CFManager:
 						optimizer = self.chk.tracking_map['optimizer']
 						s = time.time()
 						while self.in_progress_snapshot.value == 1:
+							#print("snapshot in progres!!!!!!!!!")
 							continue
 #							self.logger.info("Progresssss")
 						optimizer.step()
 						#torch.cuda.synchronize()
 						dur = time.time() - s
-						#self.logger.info("Stall to weight update = {}s".format(dur))
+						self.logger.info("Stall to weight update = {}s".format(dur))
 				else:	
 						self.logger.info("NO Optimizer found")
 

@@ -189,9 +189,9 @@ class CFIterator:
 					if self.noop:
 						self._cf_manager.save_cpu(synchronous=True, additional_snapshot=self.state_dict(), persist=self._persist, pipesnap=False)
 					elif self.pipeio:
-						self._cf_manager.save_cpu(synchronous=False, additional_snapshot=self.state_dict(), persist=self._persist, pipesnap=False, use_thread=True)
+						self._cf_manager.save_cpu(synchronous=False, additional_snapshot=self.state_dict(), persist=self._persist, pipesnap=False, use_thread=False)
 					else:
-						self._cf_manager.save_cpu(synchronous=False, additional_snapshot=self.state_dict(), persist=self._persist, pipesnap=True, use_thread=True)
+						self._cf_manager.save_cpu(synchronous=False, additional_snapshot=self.state_dict(), persist=self._persist, pipesnap=True, use_thread=False)
 
 				#self._cf_manager.save(synchronous=True, additional_snapshot=self.state_dict(), persist=False)
 			else:
