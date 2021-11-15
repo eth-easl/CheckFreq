@@ -108,7 +108,6 @@ Returns True on success, False otherwise
 			return False
 		
 		self.latest_snapshot = OrderedDict()
-		
 		start = time.time()
 		#Snapshot the state of tractable items
 		for name, ref in self.tracking_map.items():
@@ -118,7 +117,7 @@ Returns True on success, False otherwise
 				self.logger.info("Repeated entry for {}".format(name))
 				return False
 
-		if isinstance(additional_state, Mapping):
+		if additional_state:
 			self.latest_snapshot.update(additional_state)
 		
 		print("----- GPU Deep copy took: ", time.time() - start)		
@@ -136,42 +135,86 @@ Returns True on success, False otherwise
 	def _serialize_and_persist( ## THIS IS ASYNCHRONOUS (creates a process to do it)
 		self,  
 		filepath,
-		snapshot,
+		snap_ptr,
 		active_snapshot,
+		in_progress_snapshot,
 		lock,
+		change,
+		additional_state=None,
+		background=False,
+		snapshot_ready=False,
 		linkpath=None,
 		iter_chk = None,
 		epoch_chk = None, 
 		overwrite = True):
-		print("[{}] START ASYNC".format(time.time()))
 
-		with lock:
-			if active_snapshot.value == 0:
-				self.logger.error("Cannot persist. Empty snapshot")
-				return
-		#Create new stream
-		s = torch.cuda.Stream()
-		torch.cuda.stream(s)
+		while True:
 
-		#print("Saving : {}".format(filepath))
-		torch.save(snapshot, filepath)
-		#print("Saved : {}".format(filepath))
-		# Clear the snapshot.
-		with lock:
-			active_snapshot.value = 0
+			if background:
+				with lock:
+					if change.value==0:		
+						#print("---------- I am stuck!")
+						continue
 
-		# Ensure its persisted
-		f = open(filepath, 'a+')
-		os.fsync(f.fileno())
-		f.close()
 
-		update_stats(
-				filepath,
-				iter_chk=iter_chk,
-				overwrite=overwrite,
-				epoch_chk = epoch_chk,
-				linkpath=linkpath)
-		print("[{}] END ASYNC".format(time.time()))
+			print("[{}] START ASYNC".format(time.time()))
+
+			print("------------------------------------------ kwargs: ", background, iter_chk, overwrite)
+			if not snapshot_ready:
+				self.logger.info("[{}] START SNAPSHOT".format(time.time()))
+				start = time.time()
+				success = self._snapshot(active_snapshot.value, additional_state=additional_state)
+				end1 = time.time()
+				print("-------------- Snapshot took: ", end1-start)
+
+				if success:		
+					with lock:
+						in_progress_snapshot.value = 0
+						active_snapshot.value = 1
+				else:
+					change.value=0
+					self.logger.error("Cannot persist. Empty snapshot")
+					return
+			else:
+				with lock:
+					if active_snapshot.value == 0:
+						change.value=0
+						self.logger.error("Cannot persist. Empty snapshot")
+						return
+			
+			snapshot = self.latest_snapshot
+			#print(snapshot)
+			#Create new stream
+			s = torch.cuda.Stream()
+			torch.cuda.stream(s)
+
+			#print("Saving : {}".format(filepath))
+			torch.save(snapshot, filepath.value)
+			#print("Saved : {}".format(filepath))
+			# Clear the snapshot.
+			with lock:
+				active_snapshot.value = 0
+
+			# Ensure its persisted
+			f = open(filepath.value, 'a+')
+			os.fsync(f.fileno())
+			f.close()
+
+			update_stats(
+					filepath.value,
+					iter_chk=iter_chk,
+					overwrite=overwrite,
+					epoch_chk = epoch_chk,
+					linkpath=linkpath)
+			print("[{}] END ASYNC".format(time.time()))
+
+			with lock:
+				snapshot={}
+				change.value=0
+
+			if not background:
+				print(" *** ------------------------------------ TEMPORARY, exit now -----------------------------------")
+				return	
 
 
 	def _serialize_and_persist_direct(
@@ -184,6 +227,7 @@ Returns True on success, False otherwise
 		iter_chk = None,
 		epoch_chk = None,
 		overwrite = True):
+
 
 		# create the snapshot (not deep copy because it is not pipelined?)
 		snap_ptr = {}
@@ -231,7 +275,6 @@ Returns True on success, False otherwise
 		s = time.time()
 
 
-		print("--- New thread created!")
 		while True:
 
 			if background:
@@ -274,10 +317,11 @@ Returns True on success, False otherwise
 			if additional_state:
 				snapshot.update(additional_state)
 			
-			print(snapshot)
+			#print(snapshot)
 			if profile:
 				with lock:
 					active_snapshot.value = 0
+					change.value = 0
 				print("------------------------------------- TEMPORARY, exit now -----------------------------------")
 				return
 			
@@ -303,14 +347,15 @@ Returns True on success, False otherwise
 			print("Time to checkpoint = {}s".format(time.time()-s))
 			print("[{}] END ASYNC".format(time.time()))
 
+			with lock:
+				snapshot={}
+				change.value=0
 
 			if not background:
 				print("------------------------------------- TEMPORARY, exit now -----------------------------------")
 				return	
 
-			with lock:
-				snapshot={}
-				change.value=0
+			
 
 			
 

@@ -182,11 +182,20 @@ class CFManager:
 				self.chk_global_id += 1
 				chk_fname = self.chk_prefix + str(self.chk_global_id)
 				filepath = self._get_full_path(chk_fname)
+
+				self.filepath.value = '' + filepath
+
 				if is_epoch:
 						chk_fname_link = self.chk_prefix + str(self.chk_global_id) + '_' +str(epoch) 
 						filepath_link = self._get_full_path(chk_fname, epoch=True)
 
 				self.logger.info("Writing chk {} at {}".format(self.chk_global_id, filepath))
+
+				if additional_snapshot:
+					for name,ref in additional_snapshot.items():
+						self.additional_snapshot[name] = ref
+				else:
+					self.additional_snapshot.clear()
 
 
 				if synchronous:
@@ -216,26 +225,42 @@ class CFManager:
 
 
 				# Check if there's an ongoing checkpoint operation
-				if self.chk_process is not None:
+				if self.chk_process_epoch is not None:
 						# There is an checkpoint underway. Wait
-						if self.chk_process.is_alive():
-								self.chk_process.join()
+						if self.chk_process_epoch.is_alive():
+								self.chk_process_epoch.join()
+
+				# Check if there's an ongoing checkpoint operation 
+				if self.chk_process is not None:
+						while self.change.value==1:		
+							# this means a checkpoint is on progress (wait for process doing the checkpoint to set variable to 0)
+							continue
 
 				# Once complete, initiate the next checkpoint synchronously
-				self.logger.info("[{}] START SNAPSHOT".format(time.time()))
-				start = time.time()
-				success = self.chk._snapshot(self.active_snapshot.value, additional_state=additional_snapshot)
-				end1 = time.time()
-				print("-------------- Snapshot took: ", end1-start)
+				with self.lock:
+                                        self.in_progress_snapshot.value = 1
+
+				dur_snap = 0
+				if profile_snap or profile_full: 
+					self.logger.info("[{}] START SNAPSHOT".format(time.time()))
+					start = time.time()
+					success = self.chk._snapshot(self.active_snapshot.value, additional_state=additional_snapshot)
+					end1 = time.time()
+					print("-------------- Snapshot took: ", end1-start)
 				
-				if success:
-					with self.lock:
-						self.active_snapshot.value = 1
+					if success:
+						with self.lock:
+							self.in_progress_snapshot.value = 0
+							self.active_snapshot.value = 1
+	
+					dur_snap = time.time() -s
+					
+					if profile_snap:
+						return dur_snap, 0
 
-				dur_snap = time.time() -s
+				for name, ref in self.chk.tracking_map.items():
+					self.snap_ptr[name] = ref.state_dict()
 
-				if profile_snap:
-					return dur_snap, 0
 
 				if use_thread:
 					fn = getattr(threading, 'Thread')
@@ -244,34 +269,54 @@ class CFManager:
 				print("Function is {}".format(fn))
 
 
+				print("self spanwned is: ", self.spawned)
+				#print(self.snapshot)			
+				with self.lock:
+					self.change.value = 1
+
 				# Start persist asynchronously
 				if not is_epoch:
+					background=True
+					snapshot_ready = False
+					if profile_snap or profile_full:
+						background=False
+						snapshot_ready=True
 					keywords = { \
+						'snapshot_ready': snapshot_ready, \
+						'background': background, \
 						'iter_chk':self.available_chk_iters, \
 						'overwrite':self.overwrite}
-					self.chk_process = \
-						fn(target=self.chk._serialize_and_persist,	\
-						args=[filepath, self.chk.latest_snapshot, self.active_snapshot, self.lock], kwargs=keywords)
+					if not self.spawned:
+						self.chk_process = \
+							fn(target=self.chk._serialize_and_persist,	\
+							args=[self.filepath, self.snap_ptr, self.active_snapshot, self.in_progress_snapshot, self.lock, self.change, self.additional_snapshot], kwargs=keywords)
+						self.chk_process.start()
+					if not profile_snap and not profile_full:
+						self.spawned=True
+						#print("----------------- Spawned a process with PID: ", self.chk_process.pid)
+					
 				else:
+					print("-------------- EPOCH CHECKP -----------")
 					keywords = { \
+						'snapshot_ready': False, \
+						'background': False, \
 						'iter_chk':self.available_chk_iters, \
 						'overwrite':self.overwrite, \
 						'epoch_chk':self.available_chk_epochs,\
 						'linkpath': filepath_link}
-					self.chk_process = \
+					self.chk_process_epoch = \
 						fn(target=self.chk._serialize_and_persist,\
-						args=[filepath, self.chk.latest_snapshot, self.active_snapshot, self.lock], kwargs=keywords)
+						args=[self.filepath, self.snap_ptr, self.active_snapshot, self.in_progress_snapshot, self.lock, 1, self.additional_snapshot], kwargs=keywords)
 
-				self.logger.info("[{}] CALL PROCESS NOW".format(time.time()))
-				self.chk_process.start()
-				self.logger.info("[{}] RETURN FROM START".format(time.time()))
+					self.logger.info("[{}] CALL PROCESS NOW".format(time.time()))
+					self.chk_process_epoch.start()
+					self.logger.info("[{}] RETURN FROM START".format(time.time()))
 				
 				if profile_full:
 						print("----------- Wait for process to finish")
 						self.chk_process.join()
 
 				dur = time.time() -s
-				print("----------- Remaining time (after snapshot): ", time.time() - end1)
 				
 				#time.sleep(1)
 				return dur_snap, dur 
@@ -309,15 +354,21 @@ class CFManager:
 
 				self.logger.info("Writing chk {} at {}".format(self.chk_global_id, filepath))
 
-				# Check if there's an ongoing checkpoint operation
+				# Check if there's an ongoing checkpoint operation - epoch
 				if self.chk_process_epoch is not None:
 						# There is an checkpoint underway. Wait
 						if self.chk_process_epoch.is_alive():
 								self.chk_process_epoch.join()
 
+				# Check if there's an ongoing checkpoint operation 
+				if self.chk_process is not None:
+						while self.change.value==1:		
+							# this means a checkpoint is on progress (wait for process doing the checkpoint to set variable to 0)
+							continue
+
 				if not pipesnap and self.chk_process is not None:
 					if self.chk_process.is_alive():
-                                        	self.chk_process.join()
+                        				self.chk_process.join()
 
 
 				self.logger.info("Starting next snapshot {:.2f}s".format(time.time()-s))
