@@ -97,7 +97,7 @@ class CFCheckpoint(object):
 
 	This in-memory snapshotting is done synchronously
 
-	Returns True on success, False otherwise
+Returns True on success, False otherwise
 
 	"""
 	
@@ -229,11 +229,7 @@ class CFCheckpoint(object):
 
 		
 		s = time.time()
-		#time.sleep(1)
-		start = time.time()
 
-		i=0 # TODO: enable filepath being passed as arg
-		pref = filepath[:-5]
 		while True:
 
 			if background:
@@ -247,6 +243,7 @@ class CFCheckpoint(object):
 					in_progress_snapshot.value = 0
 
 			if not snapshot:
+
 				print("[{}] START ASYNC".format(time.time()))
 				if active_snapshot.value == 1:
 					print("ERROR! Snapshot active")
@@ -277,21 +274,23 @@ class CFCheckpoint(object):
 			if profile:
 				with lock:
 					active_snapshot.value = 0
+				print("------------------------------------- TEMPORARY, exit now -----------------------------------")
 				return
-
-
-			torch.save(snapshot, filepath)
+			
+			#print(snapshot)
+			torch.save(snapshot, filepath.value)
 
 			with lock:
 				active_snapshot.value = 0
 
 			# Ensure its persisted
-			f = open(filepath, 'a+')
+			f = open(filepath.value, 'a+')
 			os.fsync(f.fileno())
 			f.close()
-			
+	
+		
 			update_stats(
-					filepath,
+					filepath.value,
 					iter_chk=iter_chk,
 					overwrite=overwrite,
 					epoch_chk = epoch_chk,
@@ -299,6 +298,7 @@ class CFCheckpoint(object):
 			
 			print("Time to checkpoint = {}s".format(time.time()-s))
 			print("[{}] END ASYNC".format(time.time()))
+
 
 			if not background:
 				print("------------------------------------- TEMPORARY, exit now -----------------------------------")
@@ -309,8 +309,6 @@ class CFCheckpoint(object):
 				change.value=0
 
 			
-			i+=1
-			filepath = pref + str(i) + ".chk"
 
 	"""
 	Restores the checkpoint at given path
