@@ -3,7 +3,6 @@ This branch contains some changes that enable having a background process doing 
 
 Note the following:
 * This code enables having a running background process only for CPU so far.
-* It has not been tested with profiling mode, so use it only with the MANUAL mode.
 
 
 # CheckFreq: Frequent, Fine-Grained DNN Checkpointing
