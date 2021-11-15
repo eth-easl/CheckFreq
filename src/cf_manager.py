@@ -388,6 +388,7 @@ class CFManager:
 				print("Function is {}".format(fn))
                                 #snapshot = None
                                 
+				print("self spanwned is: ", self.spawned)
 				#print(self.snapshot)			
 				with self.lock:
 					self.change.value = 1
@@ -402,14 +403,16 @@ class CFManager:
 						'iter_chk':self.available_chk_iters, \
 						'overwrite':self.overwrite, \
 						'profile': profile_snap }
-					if not self.spawned or not pipesnap: # when only IO is pipelined, just spawn a new process
+					if not self.spawned or not pipesnap: # when only IO is pipelined, just spawn a new process/thread
 						self.chk_process = \
 							fn(target=self.chk._snapshot_and_persist_async,	\
 							args=[self.filepath, self.active_snapshot, self.in_progress_snapshot, snapshot, self.lock, self.snap_ptr, self.change, self.additional_snapshot], kwargs=keywords)
 						self.chk_process.start()
-					if not profile_snap and not pipesnap:
-						print("--------------- Spawned a background process with PID: ", self.chk_process.pid)
+					print(profile_snap, pipesnap)
+					if not profile_snap and pipesnap:
+						#if not use_thread:
 						self.spawned = True
+						#print("self spanwned is: ", self.spawned)
 
 				else:
 					print("-------------- EPOCH CHECKP -----------")

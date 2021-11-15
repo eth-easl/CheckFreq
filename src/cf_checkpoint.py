@@ -230,6 +230,8 @@ Returns True on success, False otherwise
 		
 		s = time.time()
 
+
+		print("--- New thread created!")
 		while True:
 
 			if background:
@@ -242,6 +244,7 @@ Returns True on success, False otherwise
 				with lock:
 					in_progress_snapshot.value = 0
 
+			print("------------------------------------------ kwargs: ", background, epoch_chk, overwrite, profile)
 			if not snapshot:
 
 				print("[{}] START ASYNC".format(time.time()))
@@ -271,6 +274,7 @@ Returns True on success, False otherwise
 			if additional_state:
 				snapshot.update(additional_state)
 			
+			print(snapshot)
 			if profile:
 				with lock:
 					active_snapshot.value = 0
