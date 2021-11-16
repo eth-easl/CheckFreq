@@ -28,12 +28,12 @@ import botocore
 
 import argparse
 from torch.multiprocessing import Pool, Process, set_start_method, Manager, Value, Lock
-
+import ctypes
 
 import vgg_torch
 import resnet
 import config_model
-import cause_node_fails
+#import cause_node_fails
 from dist_chk import CFCheckpoint
 
 def get_pid(name):
@@ -572,7 +572,6 @@ class PSStrategy(object):
             ray.get([ps.store_checkpoint.remote(epoch, itr)
                     for ps in self.servers])
         check_time = time.time() - start
-        print("total chjoin_proceck took: ", check_time)
         return ray.get(itr)+1, check_time
 
 
