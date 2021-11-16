@@ -28,6 +28,7 @@ import botocore
 
 import argparse
 from torch.multiprocessing import Pool, Process, set_start_method, Manager, Value, Lock
+
 import ctypes
 
 import vgg_torch
@@ -35,6 +36,12 @@ import resnet
 import config_model
 #import cause_node_fails
 from dist_chk import CFCheckpoint
+
+try:
+		set_start_method('spawn')
+except RuntimeError:
+		pass
+
 
 def get_pid(name):
     n = check_output(["pidof", name])
@@ -357,12 +364,31 @@ class PS(object):
         self.mw_dict = self.get_model_weights(0)
         self.mw_keys = list(self.mw_dict.keys())
         self.num_keys = len(self.mw_keys)
+
+        '''
+        for name,ref in self.params.items():
+            #print(ref)
+            ref.share_memory_()
+
+        print(self.optimizer)
+
+        for name,ref in self.optimizer.items():
+            print(ref)
+            ref.share_memory_()
+
+	
         self.chk = CFCheckpoint(model=self.params, optimizer=self.optimizer)
+        print(self.chk)
+        
+        '''
         return True
 
     def apply_updates(self, epoch, itr, *list_of_gradients):
 
         start_time = time.time()
+        while self.in_progress_snapshot.value == 1:
+            continue
+        print("stall for snapshot took: ", time.time()-start_time)
 
         assert(len(list_of_gradients) >= 1)
         summed_gradient_dict = dict()
@@ -373,6 +399,8 @@ class PS(object):
             for i in range(len(list_of_gradients)):
                 t += torch.from_numpy(list_of_gradients[i][name])
             summed_gradient_dict[name] = t
+
+	
 
         self.optimizer.zero_grad()
 
@@ -394,6 +422,21 @@ class PS(object):
             if gradients[name] is not None:
                 p.grad = gradients[name]
 
+    def make_shm(self, obj):
+       if obj is None:
+           return
+       if torch.is_tensor(obj):
+           obj.share_memory_()
+       elif isinstance(obj, dict):
+           for name, ref in obj.items(): 
+              self.make_shm(ref)
+       elif isinstance(obj, list):
+           for x in obj:
+              self.make_shm(x)
+       else:
+           return
+
+
     def store_checkpoint(self, epoch, it):
 
         # https://pytorch.org/tutorials/recipes/recipes/saving_and_loading_a_general_checkpoint.html
@@ -407,8 +450,23 @@ class PS(object):
         
         skeys = list(self.optimizer.state_dict()['state'].keys())
         k = skeys[-1]
-        print("---- from checkpoint, MODEL: ", 'linear.weight', self.params['linear.weight'])
-        print("---- from checkpoint, OPT: ", k, self.optimizer.state_dict()['state'][k])
+        print("---- from PS, MODEL: ", 'linear.weight', self.params['linear.weight'])
+        print("---- from PS, OPT: ", k, self.optimizer.state_dict()['state'][k])
+       
+        if not self.chk:
+            for name,ref in self.params.items():
+               #print(ref)
+               ref.share_memory_()
+
+            #print(self.optimizer.state_dict())
+
+            for name,ref in self.optimizer.state_dict().items():
+               print(name)	  
+               self.make_shm(ref)
+
+            self.chk = CFCheckpoint(model=self.params, optimizer=self.optimizer)
+            print(self.chk)
+
         if self.synchronous:
 
             self.chk._serialize_and_persist(self.filepath,  self.active_snapshot, self.in_progress_snapshot, self.lock, 1, \
@@ -427,7 +485,7 @@ class PS(object):
             if self.use_thread:
                     fn = getattr(threading, 'Thread')
             else:
-                fn = globals()["Process"]	
+                fn = Process #globals()["Process"]	
             print("Function is {}".format(fn))
 
             print("self spanwned is: ", self.spawned)
@@ -444,6 +502,7 @@ class PS(object):
 					fn(target=self.chk._serialize_and_persist,	\
 						args=[self.filepath, self.active_snapshot, self.in_progress_snapshot, self.lock, self.change, self.additional_snapshot], kwargs=keywords)
                 self.chk_process.start()
+                self.spawned = True
 
         savetime = time.time()-start
         print("store checkpoint took: ", savetime, " sec")
