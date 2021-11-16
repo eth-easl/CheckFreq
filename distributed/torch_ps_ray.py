@@ -1,6 +1,7 @@
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
+from types import SimpleNamespace
 
 import numpy as np
 import os
@@ -26,12 +27,14 @@ import time
 import botocore
 
 import argparse
+from torch.multiprocessing import Pool, Process, set_start_method, Manager, Value, Lock
+
 
 import vgg_torch
 import resnet
 import config_model
 import cause_node_fails
-
+from dist_chk import CFCheckpoint
 
 def get_pid(name):
     n = check_output(["pidof", name])
@@ -270,25 +273,41 @@ class PS(object):
         print('CUBLAS: ', os.environ.get('CUBLAS_WORKSPACE_CONFIG'))
         seed_everything()
 
+        ### for training
         self.start_epoch = 0
         self.reloaded = False
         self.ready = False
         self.model_name = model_name
+        self.num_ps = num_ps
+        self.it = -1
 
         self.params = None
         self.optimizer = None
         self.idx = idx
-        self.freq = freq
+
+        ### for checkpointing
         self.checkp_local = checkp_local
-        self.rocksdb_lat = rocksdb_lat
         self.synchronous = synchronous
+        self.chk = None # set later
+        self.overwrite = True
+        self.mp_manager = Manager()
 
-        self.it = -1
+        self.active_snapshot = Value('i', 0)
+        self.lock = Lock()
+        self.in_progress_snapshot = Value('i', 0)
 
-        self.num_ps = num_ps
+        # Handle to the process performing checkpoint
+        self.chk_process = None
+        self.spawned = False
+        self.use_thread = False
 
-        self.sleep_write = 0
-        self.sleep_read = 0
+        self.iter = Value('i', 0)
+        self.epoch = Value('i', 0)
+        self.last_chk_it = Value('i', -1)
+
+        self.change = Value('i', 0)					
+        self.filepath = self.mp_manager.Value(ctypes.c_wchar_p, "") #self.mp_manager.dict()
+        self.additional_snapshot = self.mp_manager.dict()
 
         self.dirpath = '/home/ubuntu/CheckFreq/distributed/checkpoint/'
         if not os.path.isdir(self.dirpath):
@@ -333,6 +352,7 @@ class PS(object):
         self.mw_dict = self.get_model_weights(0)
         self.mw_keys = list(self.mw_dict.keys())
         self.num_keys = len(self.mw_keys)
+        self.chk = CFCheckpoint(model=self.params, optimizer=self.optimizer)
         return True
 
     def apply_updates(self, epoch, itr, *list_of_gradients):
@@ -374,28 +394,50 @@ class PS(object):
         # https://pytorch.org/tutorials/recipes/recipes/saving_and_loading_a_general_checkpoint.html
 
         print('Saving. Epoch:', epoch, ' , Iter: ', it)
-        state = {
-            'net': self.params,
-            'opt': self.optimizer.state_dict(),
-            'epoch': epoch,
-            'iter': it
-        }
+        self.additional_snapshot['epoch'] = epoch
+        self.additional_snapshot['iter'] = it
 
         start = time.time()
-        filepath = self.dirpath + 'chk_' + str(self.idx) + '_' + str(it) + '.chk'
-        torch.save(state, filepath)
-        f = open(filepath, 'a+')
-        os.fsync(f.fileno())
-        f.close()
+        self.filepath.value = self.dirpath + 'chk_' + str(self.idx) + '_' + str(it) + '.chk'
 
-        # remove previous checkpoint
-        prev_filepath = self.dirpath + 'chk_' + str(self.idx) + '_' + str(self.last_it) + '.chk'
-        if os.path.exists(prev_filepath):
-            os.remove(prev_filepath)
+        if self.synchronous:
 
-        self.last_it = it
+            self.chk._serialize_and_persist(self.filepath,  self.active_snapshot, self.in_progress_snapshot, self.lock, 1, \
+                                             self.additional_snapshot, background=False, snapshot_ready=False, iter_chk=self.last_it, overwrite=True)
+        else:
+            # Check if there's an ongoing checkpoint operation 
+            if self.chk_process is not None:
+                while self.change.value==1:		
+                    # this means a checkpoint is on progress (wait for process doing the checkpoint to set variable to 0)
+                    continue
+
+			# Once complete, initiate the next checkpoint synchronously
+            with self.lock:
+                self.in_progress_snapshot.value = 1
+
+            if self.use_thread:
+                    fn = getattr(threading, 'Thread')
+            else:
+                fn = globals()["Process"]	
+            print("Function is {}".format(fn))
+
+            print("self spanwned is: ", self.spawned)
+            with self.lock:
+                self.change.value = 1
+
+            if not self.spawned:
+                keywords = { \
+						'snapshot_ready': False, \
+						'background': True, \
+						'iter_chk':self.last_chk_it, \
+						'overwrite':self.overwrite}
+                self.chk_process = \
+					fn(target=self.chk._serialize_and_persist,	\
+						args=[self.filepath, self.active_snapshot, self.in_progress_snapshot, self.lock, self.change, self.additional_snapshot], kwargs=keywords)
+                self.chk_process.start()
+
         savetime = time.time()-start
-        print("saving took: ", savetime, " sec")
+        print("store checkpoint took: ", savetime, " sec")
 
     def load_checkpoint(self, checkpoint_path):
         #assert os.path.isdir(checkpoint_path), 'Error: no checkpoint directory found!'
@@ -405,6 +447,15 @@ class PS(object):
         self.optimizer.load_state_dict(checkpoint['opt'])
         self.epoch = checkpoint['epoch']
         self.it = checkpoint['iter']
+
+    def join_proc(self):
+        if self.chk_process is not None:
+            if self.chk_process.is_alive():
+                pid = self.chk_process.pid
+                while (self.chk_process.is_alive()):
+                    os.system("kill -9 " + str(pid))
+                print("-------------- Killed!")
+
 
 
 class PSStrategy(object):
@@ -489,6 +540,9 @@ class PSStrategy(object):
     def reset(self):
         ray.get([ps.reset.remote() for ps in self.servers])
 
+    def clean(self):
+        ray.get([ps.reset.join_proc() for ps in self.servers])
+
     def step(self, epoch, it, nw):
         # stitch parameters
 
@@ -518,7 +572,7 @@ class PSStrategy(object):
             ray.get([ps.store_checkpoint.remote(epoch, itr)
                     for ps in self.servers])
         check_time = time.time() - start
-        print("total check took: ", check_time)
+        print("total chjoin_proceck took: ", check_time)
         return ray.get(itr)+1, check_time
 
 
@@ -652,6 +706,7 @@ def main():
             str(killed) + " , check time: " + str(check_time) + "\n"
         start = time.time()
 
+    strategy.clean()
     f = open('/home/ubuntu/CheckFreq/distributed/output.txt', 'a')
     wr = "Iters: " + str(e_iters) + ", Freq: " + str(check_freq_iters) + ", Num workers: " + str(num_workers) + ", Num servers: " + str(num_servers) + \
         " , accuracy: " + str(accuracy) + " , time: " + str(training_time) + \
