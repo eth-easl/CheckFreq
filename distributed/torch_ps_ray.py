@@ -312,6 +312,11 @@ class PS(object):
         self.dirpath = '/home/ubuntu/CheckFreq/distributed/checkpoint/'
         if not os.path.isdir(self.dirpath):
             os.mkdir(self.dirpath)
+        else:
+                # delete contents for now
+                for filename in os.listdir(self.dirpath):
+                        file_path = os.path.join(self.dirpath, filename)
+                        os.remove(file_path)
 
         print("start from: ", self.start_epoch, self.it)
 
@@ -399,11 +404,15 @@ class PS(object):
 
         start = time.time()
         self.filepath.value = self.dirpath + 'chk_' + str(self.idx) + '_' + str(it) + '.chk'
-
+        
+        skeys = list(self.optimizer.state_dict()['state'].keys())
+        k = skeys[-1]
+        print("---- from checkpoint, MODEL: ", 'linear.weight', self.params['linear.weight'])
+        print("---- from checkpoint, OPT: ", k, self.optimizer.state_dict()['state'][k])
         if self.synchronous:
 
             self.chk._serialize_and_persist(self.filepath,  self.active_snapshot, self.in_progress_snapshot, self.lock, 1, \
-                                             self.additional_snapshot, background=False, snapshot_ready=False, iter_chk=self.last_it, overwrite=True)
+                                             self.additional_snapshot, background=False, snapshot_ready=False, iter_chk=self.last_chk_it, overwrite=True)
         else:
             # Check if there's an ongoing checkpoint operation 
             if self.chk_process is not None:
@@ -568,7 +577,7 @@ class PSStrategy(object):
         ray.wait(ret)
 
         start = time.time()
-        if (self.freq > 0 and ray.get(itr) % self.freq == 0):
+        if (self.freq > 0 and ray.get(itr) >0 and  ray.get(itr) % self.freq == 0):
             ray.get([ps.store_checkpoint.remote(epoch, itr)
                     for ps in self.servers])
         check_time = time.time() - start

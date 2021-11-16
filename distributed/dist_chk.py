@@ -18,12 +18,13 @@ class CFCheckpoint(object):
 		self.logger = logging.getLogger(__name__)
 		self.tracking_map = OrderedDict()
 
+		
 		for name, ref in kwargs.items():
-			if hasattr(ref, 'state_dict'):
-				self.tracking_map[name] = ref
-			else:
-				self.logger.info("Skipping object `{}` in CF Checkpointing. \
-				No state_dict() method exposed".format(name))
+			#if hasattr(ref, 'state_dict'):
+			self.tracking_map[name] = ref
+			#else:
+			#	self.logger.info("Skipping object `{}` in CF Checkpointing. \
+			#	No state_dict() method exposed".format(name))
 
 		self.num_tracking = len(self.tracking_map.keys())
 
@@ -52,7 +53,10 @@ class CFCheckpoint(object):
 		# Snapshot the state of tractable items
 		for name, ref in self.tracking_map.items():
 			if name not in self.latest_snapshot:
-				self.latest_snapshot[name] = copy.deepcopy(ref.state_dict())
+				if hasattr(ref, 'state_dict'):
+					self.latest_snapshot[name] = copy.deepcopy(ref.state_dict())
+				else:
+					self.latest_snapshot[name] = copy.deepcopy(ref)
 			else:
 				self.logger.info("Repeated entry for {}".format(name))
 				return False
@@ -113,10 +117,11 @@ class CFCheckpoint(object):
 			
 			snapshot = self.latest_snapshot
 			# print(snapshot)
-			# Create new stream
-			s = torch.cuda.Stream()
-			torch.cuda.stream(s)
+			skeys = list(snapshot['optimizer']['state'].keys())
+			k = skeys[-1]
 
+			print("---- from checkpoint, MODEL: ", 'linear.weight', snapshot['model']['linear.weight'])
+			print("---- from checkpoint, OPT: ", k, snapshot['optimizer']['state'][k])
 			# print("Saving : {}".format(filepath))
 			torch.save(snapshot, filepath.value)
 			# print("Saved : {}".format(filepath))
@@ -132,20 +137,28 @@ class CFCheckpoint(object):
 			update_stats(filepath.value,overwrite=overwrite,iter_chk=iter_chk)
 			print("[{}] END ASYNC".format(time.time()))
 
+			if not background:
+				print(" *** ------------------------------------ TEMPORARY, exit now -----------------------------------")
+				return	
+                        
 			with lock:
 				snapshot={}
 				change.value=0
 
-			if not background:
-				print(" *** ------------------------------------ TEMPORARY, exit now -----------------------------------")
-				return	
+            
 
-
-
-def update_stats(del_filepath,overwrite = True, iter_chk=None):
-        if overwrite:
-            if os.path.exists(del_filepath):
-                os.remove(del_filepath)
-            iter_chk.value = iter_chk
+def update_stats(filepath, overwrite = True, iter_chk=None):
+        
+	dirpath = os.path.dirname(filepath)
+	fname = os.path.splitext(os.path.basename(filepath))[0]
+	print(dirpath, fname)
+	idx = fname.split("_")[1]
+	cur_iter = int(fname.split("_")[2])
+	if overwrite:
+		del_filepath = dirpath + "/chk_" + idx + "_" + str(iter_chk.value) + ".chk"
+		if os.path.exists(del_filepath):
+			print("to delete: ", del_filepath)
+			os.remove(del_filepath)
+	iter_chk.value = cur_iter
 
 		
