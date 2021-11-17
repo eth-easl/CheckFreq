@@ -26,7 +26,7 @@ if len(args.cmd) == 0 or args.cmd[0] != '--':
     exit(1)
 
 cmd = ' '.join(args.cmd[1:])
-logger.info("Command to be executed {}".format(cmd))
+logger.info("Command to be executed: {}".format(cmd))
 
 crash_count = 0
 while True:

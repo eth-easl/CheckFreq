@@ -390,12 +390,16 @@ def main():
     args.steps_so_far = 0
     extra_state=None
     if args.resume:
+        cf_restore_start_time = time.time()
         extra_state = cf_manager.restore(gpu=args.gpu)
+        cf_restore_time = time.time() - cf_restore_start_time
         if extra_state is not None:
             args.start_epoch = extra_state['epoch']
             args.start_index = extra_state['start_index']
             args.steps_so_far = extra_state['steps_so_far']
+            total_restore_time = time.time() - start
             print("Populated: epoch :{}, start_idx:{}, steps_so_far:{}".format(args.start_epoch,args.start_index,args.steps_so_far))
+            print("CF RESTORE TIME: cf_manager.restore: {}, total: {}".format(cf_restore_time, total_restore_time)
         
         #if os.path.isfile(args.resume):
         #    print("=> loading checkpoint '{}'".format(args.resume))
