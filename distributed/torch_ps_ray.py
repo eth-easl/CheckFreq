@@ -367,24 +367,6 @@ class PS(object):
         self.mw_dict = self.get_model_weights(0)
         self.mw_keys = list(self.mw_dict.keys())
         self.num_keys = len(self.mw_keys)
-        
-        '''
-        for name,ref in self.params.items():
-            #print(ref)
-            ref.share_memory_()
-
-        #print(self.optimizer.state_dict())
-
-        for name,ref in self.optimizer.state_dict().items():
-            print(name)
-            self.make_shm(ref)
-
-	
-
-        self.chk = CFCheckpoint(model=self.params, optimizer=self.optimizer)
-        print(self.chk)
-        '''
-
         return True
 
     def apply_updates(self, epoch, itr, *list_of_gradients):
@@ -564,6 +546,13 @@ class PSStrategy(object):
         self.profile = profile
         self.prof_steps = prof_steps
         self.prof_done = False
+        self.steps_since_checkp = 0
+        self.monitor = False
+        self.monitor_iter = 0
+        self.iter_dur = []
+        self.prev_iter_mean = 0
+        self.max_overhead = 5
+
 
         nodes_info = ray.nodes()
         cpu_nodes = ['node:' + n['NodeManagerAddress']
@@ -594,9 +583,6 @@ class PSStrategy(object):
         for j in range(self.num_ps):
             self.servers.append(ps[j].remote(
                 j, freq, self.num_ps, self.checkp_local, self.rocksdb_lat, self.model_name, self.synchronous))
-
-        # for profiling
-        self.iter_dur = []
 
         self.initialize()
 
@@ -658,7 +644,32 @@ class PSStrategy(object):
         chk_freq = max(math.ceil((t_f - overhead)/t_i), 1)
         print("t_i: ", t_i, " , overhead: ", overhead, " , t_f: ", t_f) 
         print("------------ CheckFreq found: ", chk_freq)
+        self.steps_since_checkp = 0
+        self.iter_dur = []
+
+        # start monitoring
+        self.monitor = True
+        self.monitor_iter = 0
+        self.prev_iter_mean = t_i
         return chk_freq
+
+    def adapt_freq(self):
+        cur_iter_mean = mean(self.iter_dur)
+        cur_total = sum(self.iter_dur)
+        old_total = self.prev_iter_mean * len(self.iter_dur)
+
+        overhead_full = cur_total-old_total
+        overhead_perc = 100 * overhead_full/old_total
+
+        print("--------------- Iter mean new is: ", cur_iter_mean)
+        print("--------------- Overhead is: ", overhead_perc)
+
+        if overhead_perc > self.max_overhead:
+            self.freq += 1
+            print("-------------------------------- New Checkpoint Freq found: ", self.freq)
+
+        self.iter_dir = []
+        self.monitor_iter = 0 
 
     def step(self, epoch, it, nw):
         # stitch parameters
@@ -685,6 +696,7 @@ class PSStrategy(object):
         print("----------------------------------------------------------------------------------")
         ray.get(ret)
         endit = time.time()
+        print("Iteration took: ", endit-startit)
         check_time=0
         if (self.profile and (not self.prof_done) and it >= 5 and it < self.prof_steps): # collect statistics for the iteration time
             print("---------- Profile step: ", it)
@@ -698,11 +710,24 @@ class PSStrategy(object):
 
         else:
             start = time.time()
-            if (self.freq > 0 and ray.get(itr) >0 and  ray.get(itr) % self.freq == 0):
+            if (self.freq > 0 and self.steps_since_checkp == self.freq):
                 ray.get([ps.store_checkpoint.remote(epoch, itr)
                         for ps in self.servers])
                 check_time = time.time() - start
-            
+                self.steps_since_checkp=0
+            elif (self.freq > 0):
+                self.steps_since_checkp += 1 
+        
+        if self.profile and self.prof_done:
+            if not self.monitor:
+                self.monitor = True
+            if self.monitor:
+                self.monitor_iter += 1
+                if self.monitor_iter <= self.freq:
+                    self.iter_dur.append(endit-startit)
+                else:
+                    self.adapt_freq()
+
         return ray.get(itr)+1, check_time
 
 
