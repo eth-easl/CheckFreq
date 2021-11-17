@@ -364,23 +364,21 @@ class PS(object):
         self.mw_dict = self.get_model_weights(0)
         self.mw_keys = list(self.mw_dict.keys())
         self.num_keys = len(self.mw_keys)
-
-        '''
+        
         for name,ref in self.params.items():
             #print(ref)
             ref.share_memory_()
 
-        print(self.optimizer)
+        #print(self.optimizer.state_dict())
 
-        for name,ref in self.optimizer.items():
-            print(ref)
-            ref.share_memory_()
+        for name,ref in self.optimizer.state_dict().items():
+            print(name)
+            self.make_shm(ref)
 
-	
         self.chk = CFCheckpoint(model=self.params, optimizer=self.optimizer)
         print(self.chk)
-        
-        '''
+
+
         return True
 
     def apply_updates(self, epoch, itr, *list_of_gradients):
@@ -450,28 +448,31 @@ class PS(object):
         
         skeys = list(self.optimizer.state_dict()['state'].keys())
         k = skeys[-1]
-        print("---- from PS, MODEL: ", 'linear.weight', self.params['linear.weight'])
+        #print("---- from PS, MODEL: ", 'linear.weight', self.params['linear.weight'])
         print("---- from PS, OPT: ", k, self.optimizer.state_dict()['state'][k])
-       
-        if not self.chk:
-            for name,ref in self.params.items():
-               #print(ref)
-               ref.share_memory_()
-
-            #print(self.optimizer.state_dict())
-
-            for name,ref in self.optimizer.state_dict().items():
-               print(name)	  
-               self.make_shm(ref)
-
-            self.chk = CFCheckpoint(model=self.params, optimizer=self.optimizer)
-            print(self.chk)
+  
 
         if self.synchronous:
 
             self.chk._serialize_and_persist(self.filepath,  self.active_snapshot, self.in_progress_snapshot, self.lock, 1, \
                                              self.additional_snapshot, background=False, snapshot_ready=False, iter_chk=self.last_chk_it, overwrite=True)
         else:
+            
+            '''
+            state = {
+                 'model': self.params,
+                 'optimizer': self.optimizer.state_dict(),
+                 'epoch': epoch,
+                 'iter': it
+            }
+
+            tmpfile = self.dirpath + 'chk_' + str(self.idx) + '_' + str(it) +  'master.chk'
+            torch.save(state, tmpfile)
+            f = open(tmpfile, 'a+')
+            os.fsync(f.fileno())
+            f.close()
+            '''
+	    
             # Check if there's an ongoing checkpoint operation 
             if self.chk_process is not None:
                 while self.change.value==1:		
