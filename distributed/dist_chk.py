@@ -92,7 +92,7 @@ class CFCheckpoint(object):
 
 			print("[{}] START ASYNC".format(time.time()))
 
-			print("------------------------------------------ kwargs: ", background, iter_chk, overwrite)
+			#print("------------------------------------------ kwargs: ", background, iter_chk, overwrite)
 			if not snapshot_ready:
 				self.logger.info("[{}] START SNAPSHOT".format(time.time()))
 				start = time.time()
@@ -119,6 +119,7 @@ class CFCheckpoint(object):
 			if profile_snap.value == 1:
 				snapshot={}
 				with lock:
+					active_snapshot.value = 0
 					change.value=0
 					continue # not sure about that 
 
@@ -127,7 +128,7 @@ class CFCheckpoint(object):
 			k = skeys[-1]
 
 			#print("---- from checkpoint, MODEL: ", 'linear.weight', snapshot['model']['linear.weight'])
-			print("---- from checkpoint, OPT: ", k, snapshot['optimizer']['state'][k])
+			#print("---- from checkpoint, OPT: ", k, snapshot['optimizer']['state'][k])
 			# print("Saving : {}".format(filepath))
 			torch.save(snapshot, filepath.value)
 			# print("Saved : {}".format(filepath))

@@ -455,7 +455,7 @@ class PS(object):
         skeys = list(self.optimizer.state_dict()['state'].keys())
         k = skeys[-1]
         #print("---- from PS, MODEL: ", 'linear.weight', self.params['linear.weight'])
-        print("---- from PS, OPT: ", k, self.optimizer.state_dict()['state'][k])
+        #print("---- from PS, OPT: ", k, self.optimizer.state_dict()['state'][k])
   
 
         if self.synchronous:
@@ -563,6 +563,7 @@ class PSStrategy(object):
         self.synchronous = sync
         self.profile = profile
         self.prof_steps = prof_steps
+        self.prof_done = False
 
         nodes_info = ray.nodes()
         cpu_nodes = ['node:' + n['NodeManagerAddress']
@@ -637,6 +638,7 @@ class PSStrategy(object):
         ray.get([ps.reset.join_proc() for ps in self.servers])
 
     def do_prof(self, epoch, itr):
+        print(self.iter_dur)
         t_i = mean(self.iter_dur)
 
         ## first, do a simple checkpoint call to create the background processes
@@ -654,6 +656,7 @@ class PSStrategy(object):
 
         ## Check Freq:
         chk_freq = max(math.ceil((t_f - overhead)/t_i), 1)
+        print("t_i: ", t_i, " , overhead: ", overhead, " , t_f: ", t_f) 
         print("------------ CheckFreq found: ", chk_freq)
         return chk_freq
 
@@ -680,13 +683,16 @@ class PSStrategy(object):
             epoch, itr, *ps_grad_mappings[i]) for i, ps in enumerate(self.servers)]
 
         print("----------------------------------------------------------------------------------")
-        ray.wait(ret)
+        ray.get(ret)
         endit = time.time()
-        if (self.profile and (not self.prof_done) and it >= 5 and it <= self.prof_steps): # collect statistics for the iteration time
+        check_time=0
+        if (self.profile and (not self.prof_done) and it >= 5 and it < self.prof_steps): # collect statistics for the iteration time
+            print("---------- Profile step: ", it)
             self.iter_dur.append(endit-startit)
 
         elif (self.profile and (not self.prof_done) and it == self.prof_steps):
             # do prof
+            print("---------- Complete profiling")
             self.freq = self.do_prof(epoch, it)
             self.prof_done = True
 
@@ -696,8 +702,7 @@ class PSStrategy(object):
                 ray.get([ps.store_checkpoint.remote(epoch, itr)
                         for ps in self.servers])
                 check_time = time.time() - start
-            else:
-                check_time = 0
+            
         return ray.get(itr)+1, check_time
 
 
@@ -803,10 +808,7 @@ def main():
         strategy.reset()
         while j < e_iters:
             print("Iteration: ", j)
-            startit = time.time()
             j, chtime = strategy.step(i, j, num_workers)
-            endit = time.time()
-            print("It took; ", endit-startit)
             check_time += chtime
 
             if (killed < num_kills):
