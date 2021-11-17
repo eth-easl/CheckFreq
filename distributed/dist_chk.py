@@ -76,7 +76,7 @@ class CFCheckpoint(object):
 		additional_state=None,
 		background=False,
 		snapshot_ready=False,
-		linkpath=None,
+		profile_snap = None,
 		iter_chk = None,
 		epoch_chk = None, 
 		overwrite = True):
@@ -116,6 +116,12 @@ class CFCheckpoint(object):
 						return
 			
 			snapshot = self.latest_snapshot
+			if profile_snap.value == 1:
+				snapshot={}
+				with lock:
+					change.value=0
+					continue # not sure about that 
+
 			# print(snapshot)
 			skeys = list(snapshot['optimizer']['state'].keys())
 			k = skeys[-1]

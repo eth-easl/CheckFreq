@@ -2,6 +2,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 from types import SimpleNamespace
+from typing import overload
 
 import numpy as np
 import os
@@ -36,6 +37,7 @@ import resnet
 import config_model
 #import cause_node_fails
 from dist_chk import CFCheckpoint
+from statistics import mean
 
 try:
 		set_start_method('spawn')
@@ -302,6 +304,7 @@ class PS(object):
         self.active_snapshot = Value('i', 0)
         self.lock = Lock()
         self.in_progress_snapshot = Value('i', 0)
+        self.profile_snap = Value('i', 0)
 
         # Handle to the process performing checkpoint
         self.chk_process = None
@@ -438,7 +441,7 @@ class PS(object):
            return
 
 
-    def store_checkpoint(self, epoch, it):
+    def store_checkpoint(self, epoch, it, profile_snap=False, profile_all=False):
 
         # https://pytorch.org/tutorials/recipes/recipes/saving_and_loading_a_general_checkpoint.html
 
@@ -476,22 +479,6 @@ class PS(object):
 
                 self.chk = CFCheckpoint(model=self.params, optimizer=self.optimizer)
                 print(self.chk)
-
-  
-            '''
-            state = {
-                 'model': self.params,
-                 'optimizer': self.optimizer.state_dict(),
-                 'epoch': epoch,
-                 'iter': it
-            }
-
-            tmpfile = self.dirpath + 'chk_' + str(self.idx) + '_' + str(it) +  'master.chk'
-            torch.save(state, tmpfile)
-            f = open(tmpfile, 'a+')
-            os.fsync(f.fileno())
-            f.close()
-            '''
 	    
             # Check if there's an ongoing checkpoint operation 
             if self.chk_process is not None:
@@ -502,6 +489,11 @@ class PS(object):
 			# Once complete, initiate the next checkpoint synchronously
             with self.lock:
                 self.in_progress_snapshot.value = 1
+
+            if profile_snap:
+                self.profile_snap.value = 1
+            else:
+                self.profile_snap.value = 0
 
             if self.use_thread:
                     fn = getattr(threading, 'Thread')
@@ -516,6 +508,7 @@ class PS(object):
             if not self.spawned:
                 keywords = { \
 						'snapshot_ready': False, \
+                        'profile_snap': self.profile_snap, \
 						'background': True, \
 						'iter_chk':self.last_chk_it, \
 						'overwrite':self.overwrite}
@@ -524,6 +517,11 @@ class PS(object):
 						args=[self.filepath, self.active_snapshot, self.in_progress_snapshot, self.lock, self.change, self.additional_snapshot], kwargs=keywords)
                 self.chk_process.start()
                 self.spawned = True
+
+            # wait for the checkpoint/snapshot to complete if needed
+            if profile_snap or profile_all:
+                while self.change.value==1:		
+                    continue
 
         savetime = time.time()-start
         print("store checkpoint took: ", savetime, " sec")
@@ -552,7 +550,8 @@ class PSStrategy(object):
                  num_worker,
                  num_ps,
                  batch_size, freq, dl,
-                 checkp_local, rocksdb_lat, model_name, collocated, sync):
+                 checkp_local, rocksdb_lat, model_name, collocated, 
+                 sync, profile, prof_steps):
 
         self.num_ps = num_ps
         self.num_worker = num_worker
@@ -562,6 +561,8 @@ class PSStrategy(object):
         self.rocksdb_lat = rocksdb_lat
         self.model_name = model_name
         self.synchronous = sync
+        self.profile = profile
+        self.prof_steps = prof_steps
 
         nodes_info = ray.nodes()
         cpu_nodes = ['node:' + n['NodeManagerAddress']
@@ -592,6 +593,9 @@ class PSStrategy(object):
         for j in range(self.num_ps):
             self.servers.append(ps[j].remote(
                 j, freq, self.num_ps, self.checkp_local, self.rocksdb_lat, self.model_name, self.synchronous))
+
+        # for profiling
+        self.iter_dur = []
 
         self.initialize()
 
@@ -632,9 +636,31 @@ class PSStrategy(object):
     def clean(self):
         ray.get([ps.reset.join_proc() for ps in self.servers])
 
+    def do_prof(self, epoch, itr):
+        t_i = mean(self.iter_dur)
+
+        ## first, do a simple checkpoint call to create the background processes
+        ray.get([ps.store_checkpoint.remote(epoch, itr, profile_all=True) for ps in self.servers])
+
+        ## now measure the time the snapshot takes
+        start = time.time()
+        ray.get([ps.store_checkpoint.remote(epoch, itr, profile_snap=True) for ps in self.servers])
+        overhead = time.time()-start
+
+        ## finally, measure the time the actual checkpoint (snapshot + persist) takes
+        start = time.time()
+        ray.get([ps.store_checkpoint.remote(epoch, itr, profile_all=True) for ps in self.servers])
+        t_f = time.time()-start        
+
+        ## Check Freq:
+        chk_freq = max(math.ceil((t_f - overhead)/t_i), 1)
+        print("------------ CheckFreq found: ", chk_freq)
+        return chk_freq
+
     def step(self, epoch, it, nw):
         # stitch parameters
 
+        startit = time.time()
         param_ids = [ps.get_params.remote(it) for ps in self.servers]
         # worker compute the grads
         ps_grad_mappings = [list() for i in range(self.num_ps)]
@@ -655,12 +681,23 @@ class PSStrategy(object):
 
         print("----------------------------------------------------------------------------------")
         ray.wait(ret)
+        endit = time.time()
+        if (self.profile and (not self.prof_done) and it >= 5 and it <= self.prof_steps): # collect statistics for the iteration time
+            self.iter_dur.append(endit-startit)
 
-        start = time.time()
-        if (self.freq > 0 and ray.get(itr) >0 and  ray.get(itr) % self.freq == 0):
-            ray.get([ps.store_checkpoint.remote(epoch, itr)
-                    for ps in self.servers])
-        check_time = time.time() - start
+        elif (self.profile and (not self.prof_done) and it == self.prof_steps):
+            # do prof
+            self.freq = self.do_prof(epoch, it)
+            self.prof_done = True
+
+        else:
+            start = time.time()
+            if (self.freq > 0 and ray.get(itr) >0 and  ray.get(itr) % self.freq == 0):
+                ray.get([ps.store_checkpoint.remote(epoch, itr)
+                        for ps in self.servers])
+                check_time = time.time() - start
+            else:
+                check_time = 0
         return ray.get(itr)+1, check_time
 
 
@@ -690,6 +727,10 @@ def main():
                         help='Whether to colocate servers and workers')
     parser.add_argument('--sync', type=bool, default=False,
                         help='Whether checkpoint is synchronous or not')
+    parser.add_argument('--prof_steps', type=int, default=100,
+                        help='Number of profling steps')
+    parser.add_argument('--profile', type=bool, default=False,
+                        help='Whether to profile for finding the checkpoint frequency or not')                    
     args = parser.parse_args()
 
     print(args)
@@ -704,6 +745,8 @@ def main():
     model_name = args.model
     collocated = args.collocated
     sync = args.sync
+    prof_steps = args.prof_steps
+    profile  = args.profile
 
     ray.init(address="auto")
 
@@ -734,7 +777,8 @@ def main():
         num_worker=num_workers,
         num_ps=num_servers,
         batch_size=train_batch_size, freq=check_freq_iters,
-        dl=ld, checkp_local=local_check, rocksdb_lat=rocksdb_lat, model_name=model_name, collocated=collocated, sync=sync)
+        dl=ld, checkp_local=local_check, rocksdb_lat=rocksdb_lat, model_name=model_name, collocated=collocated, 
+        sync=sync, profile=profile, prof_steps=prof_steps)
 
     training_time = 0
     e_iters = math.floor(iter_per_epoch/num_workers)
