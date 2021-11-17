@@ -365,6 +365,7 @@ class PS(object):
         self.mw_keys = list(self.mw_dict.keys())
         self.num_keys = len(self.mw_keys)
         
+        '''
         for name,ref in self.params.items():
             #print(ref)
             ref.share_memory_()
@@ -375,9 +376,11 @@ class PS(object):
             print(name)
             self.make_shm(ref)
 
+	
+
         self.chk = CFCheckpoint(model=self.params, optimizer=self.optimizer)
         print(self.chk)
-
+        '''
 
         return True
 
@@ -457,7 +460,24 @@ class PS(object):
             self.chk._serialize_and_persist(self.filepath,  self.active_snapshot, self.in_progress_snapshot, self.lock, 1, \
                                              self.additional_snapshot, background=False, snapshot_ready=False, iter_chk=self.last_chk_it, overwrite=True)
         else:
-            
+           
+            if self.chk is None:
+                print("Is NONE!")
+                for name,ref in self.params.items():
+                    #print(ref)
+                    ref.share_memory_()
+
+                #print(self.optimizer.state_dict())
+
+                for name,ref in self.optimizer.state_dict().items():
+                    print(name)
+                    self.make_shm(ref)
+
+
+                self.chk = CFCheckpoint(model=self.params, optimizer=self.optimizer)
+                print(self.chk)
+
+  
             '''
             state = {
                  'model': self.params,
@@ -486,7 +506,7 @@ class PS(object):
             if self.use_thread:
                     fn = getattr(threading, 'Thread')
             else:
-                fn = Process #globals()["Process"]	
+                fn = Process#globals()["Process"]	
             print("Function is {}".format(fn))
 
             print("self spanwned is: ", self.spawned)
