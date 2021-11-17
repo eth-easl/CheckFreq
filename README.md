@@ -1,5 +1,7 @@
 ## Note for this branch:
-This branch contains some changes that enable having a background process doing snapshot and persisting, instead of creating a new process every time. For that purpose, the [torch.multiprossing]() module is used, that enable sharing tesnsors between processes. Other variables (such as flags, dictionaries, etc.) are passed using the Value and Manager objects.
+This branch simulates process failures for the CheckFreq.
+
+This branch also contains some changes that enable having a background process doing snapshot and persisting, instead of creating a new process every time. For that purpose, the [torch.multiprossing]() module is used, that enable sharing tesnsors between processes. Other variables (such as flags, dictionaries, etc.) are passed using the Value and Manager objects.
 
 Note the following:
 * This code enables having a running background process only for CPU so far.
