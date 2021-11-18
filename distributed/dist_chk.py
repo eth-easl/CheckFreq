@@ -56,7 +56,12 @@ class CFCheckpoint(object):
 				if hasattr(ref, 'state_dict'):
 					self.latest_snapshot[name] = copy.deepcopy(ref.state_dict())
 				else:
-					self.latest_snapshot[name] = copy.deepcopy(ref)
+					self.latest_snapshot[name] = {}
+					for n,r in ref.items():
+						#print(n)
+						self.latest_snapshot[name][n] = copy.deepcopy(r)
+						#print(n, r._grad.shape)
+					#self.latest_snapshot[name] = copy.deepcopy(ref)
 			else:
 				self.logger.info("Repeated entry for {}".format(name))
 				return False
@@ -116,7 +121,7 @@ class CFCheckpoint(object):
 						return
 			
 			snapshot = self.latest_snapshot
-			if profile_snap.value == 1:
+			if background and profile_snap.value == 1:
 				snapshot={}
 				with lock:
 					active_snapshot.value = 0
@@ -127,7 +132,7 @@ class CFCheckpoint(object):
 			skeys = list(snapshot['optimizer']['state'].keys())
 			k = skeys[-1]
 
-			#print("---- from checkpoint, MODEL: ", 'linear.weight', snapshot['model']['linear.weight'])
+			print("---- from checkpoint, MODEL: ", 'linear.weight', snapshot['model']['linear.weight'])
 			#print("---- from checkpoint, OPT: ", k, snapshot['optimizer']['state'][k])
 			# print("Saving : {}".format(filepath))
 			torch.save(snapshot, filepath.value)

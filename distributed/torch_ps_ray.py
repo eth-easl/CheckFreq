@@ -436,32 +436,30 @@ class PS(object):
         
         skeys = list(self.optimizer.state_dict()['state'].keys())
         k = skeys[-1]
-        #print("---- from PS, MODEL: ", 'linear.weight', self.params['linear.weight'])
+        print("---- from PS, MODEL: ", 'linear.weight', self.params['linear.weight'])
         #print("---- from PS, OPT: ", k, self.optimizer.state_dict()['state'][k])
-  
+
+        if self.chk is None:
+            print("Is NONE!")
+            for name,ref in self.params.items():
+                #print(ref)
+                ref.share_memory_()
+
+            #print(self.optimizer.state_dict())
+
+            for name,ref in self.optimizer.state_dict().items():
+                print(name)
+                self.make_shm(ref)
+
+
+            self.chk = CFCheckpoint(model=self.params, optimizer=self.optimizer)
+            print(self.chk)
 
         if self.synchronous:
 
             self.chk._serialize_and_persist(self.filepath,  self.active_snapshot, self.in_progress_snapshot, self.lock, 1, \
                                              self.additional_snapshot, background=False, snapshot_ready=False, iter_chk=self.last_chk_it, overwrite=True)
         else:
-           
-            if self.chk is None:
-                print("Is NONE!")
-                for name,ref in self.params.items():
-                    #print(ref)
-                    ref.share_memory_()
-
-                #print(self.optimizer.state_dict())
-
-                for name,ref in self.optimizer.state_dict().items():
-                    print(name)
-                    self.make_shm(ref)
-
-
-                self.chk = CFCheckpoint(model=self.params, optimizer=self.optimizer)
-                print(self.chk)
-	    
             # Check if there's an ongoing checkpoint operation 
             if self.chk_process is not None:
                 while self.change.value==1:		
@@ -621,7 +619,7 @@ class PSStrategy(object):
         ray.get([ps.reset.remote() for ps in self.servers])
 
     def clean(self):
-        ray.get([ps.reset.join_proc() for ps in self.servers])
+        ray.get([ps.join_proc.remote() for ps in self.servers])
 
     def do_prof(self, epoch, itr):
         print(self.iter_dur)
@@ -696,7 +694,6 @@ class PSStrategy(object):
         print("----------------------------------------------------------------------------------")
         ray.get(ret)
         endit = time.time()
-        print("Iteration took: ", endit-startit)
         check_time=0
         if (self.profile and (not self.prof_done) and it >= 5 and it < self.prof_steps): # collect statistics for the iteration time
             print("---------- Profile step: ", it)
@@ -714,7 +711,7 @@ class PSStrategy(object):
                 ray.get([ps.store_checkpoint.remote(epoch, itr)
                         for ps in self.servers])
                 check_time = time.time() - start
-                self.steps_since_checkp=0
+                self.steps_since_checkp=1
             elif (self.freq > 0):
                 self.steps_since_checkp += 1 
         
@@ -724,10 +721,10 @@ class PSStrategy(object):
             if self.monitor:
                 self.monitor_iter += 1
                 if self.monitor_iter <= self.freq:
-                    self.iter_dur.append(endit-startit)
+                    self.iter_dur.append(time.time()-startit)
                 else:
                     self.adapt_freq()
-
+        print("Iteration took: ", time.time()-startit)
         return ray.get(itr)+1, check_time
 
 
@@ -857,7 +854,7 @@ def main():
         tt = time.time()-start
         model.set_weights(current_weights)
         start_time = time.time()
-        accuracy = evaluate(model, test_loader)
+        accuracy = 0 #evaluate(model, test_loader)
         end_time = time.time()
         th = train_size/tt
         w = "Freq: " + str(check_freq_iters) + ", Num workers: " + str(num_workers) + ", Num servers: " + str(num_servers) + " , accuracy: " + \
