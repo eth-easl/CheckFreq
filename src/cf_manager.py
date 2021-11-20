@@ -509,8 +509,18 @@ class CFManager:
 					return None
 				filepath = self._get_full_path(fname, epoch=not latest)
 				self.logger.info("Latest checkpoint is {}".format(filepath))
-				extra_state = self.chk._restore(filepath=filepath, gpu=gpu)
-				return extra_state
+				try:
+					return self.chk._restore(filepath=filepath, gpu=gpu)
+				except RuntimeError:
+					self.logger.warning("Latest checkpoint {} may be corrupt, attempting second latest checkpoint".format(filepath))
+					self.available_chk_iters = self.available_chk_iters[:-1]
+					fname = self.get_latest_checkpoint(latest=latest, epoch=epoch)
+					if fname is None:
+						return None
+					filepath = self._get_full_path(fname, epoch=not latest)
+					self.logger.info("Second latest checkpoint is {}".format(filepath))
+					return self.chk._restore(filepath=filepath, gpu=gpu)
+
 
 
 		def initalize_chk_dir(self):
