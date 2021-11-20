@@ -399,7 +399,7 @@ def main():
             args.steps_so_far = extra_state['steps_so_far']
             total_restore_time = time.time() - start
             print("Populated: epoch :{}, start_idx:{}, steps_so_far:{}".format(args.start_epoch,args.start_index,args.steps_so_far))
-            print("CF RESTORE TIME: cf_manager.restore: {}, total: {}".format(cf_restore_time, total_restore_time)
+            print("CF RESTORE TIME: cf_manager.restore: {}, total: {}".format(cf_restore_time, total_restore_time))
         
         #if os.path.isfile(args.resume):
         #    print("=> loading checkpoint '{}'".format(args.resume))
