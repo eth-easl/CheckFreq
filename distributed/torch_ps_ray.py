@@ -16,28 +16,42 @@ from filelock import FileLock
 from torchvision import transforms
 from torchvision.datasets import CIFAR10
 from torch.utils.data import DataLoader, Subset
-import ray.services
-import boto3
+#import ray.services
+#import boto3
 import io
-from boto3.s3.transfer import TransferConfig
+#from boto3.s3.transfer import TransferConfig
 import threading
 import sys
 import random
 import math
 import time
-import botocore
+#import botocore
 
 import argparse
 from torch.multiprocessing import Pool, Process, set_start_method, Manager, Value, Lock
 
 import ctypes
-
-import vgg_torch
-import resnet
-import config_model
+import socket
+#import vgg_torch
+#import resnet
+#import config_model
 #import cause_node_fails
-from dist_chk import CFCheckpoint
+#from dist_chk import CFCheckpoint
 from statistics import mean
+
+
+### import issues! ###
+import importlib.util
+spec = importlib.util.spec_from_file_location("module.name", "/datadrive/home/ubuntu/CheckFreq/models/image_classification/config_model.py")
+config_model = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(config_model)
+
+spec1 = importlib.util.spec_from_file_location("module.name", "/datadrive/home/ubuntu/CheckFreq/distributed/dist_chk.py")
+dist_chk = importlib.util.module_from_spec(spec1)
+spec1.loader.exec_module(dist_chk)
+
+
+
 
 try:
 		set_start_method('spawn')
@@ -74,7 +88,7 @@ def split_data(n_workers):
     temp = tuple([len(train_dataset)//n_workers for i in range(n_workers)])
     print(temp)
     worker_data = torch.utils.data.random_split(
-        train_dataset, temp, generator=torch.Generator().manual_seed(42))
+        train_dataset, temp) #generator=torch.Generator().manual_seed(42)) # Comment for running with PyTorch 1.1
     print(len(worker_data))
     return worker_data, validation_dataset
 
@@ -319,7 +333,7 @@ class PS(object):
         self.filepath = self.mp_manager.Value(ctypes.c_wchar_p, "") #self.mp_manager.dict()
         self.additional_snapshot = self.mp_manager.dict()
 
-        self.dirpath = '/home/ubuntu/CheckFreq/distributed/checkpoint/'
+        self.dirpath = '/datadrive/home/ubuntu/CheckFreq/distributed/checkpoint/'
         if not os.path.isdir(self.dirpath):
             os.mkdir(self.dirpath)
         else:
@@ -452,7 +466,7 @@ class PS(object):
                 self.make_shm(ref)
 
 
-            self.chk = CFCheckpoint(model=self.params, optimizer=self.optimizer)
+            self.chk = dist_chk.CFCheckpoint(model=self.params, optimizer=self.optimizer)
             print(self.chk)
 
         if self.synchronous:
@@ -558,6 +572,7 @@ class PSStrategy(object):
         gpu_nodes = ['node:' + n['NodeManagerAddress']
                      for n in nodes_info if 'GPU' in n["Resources"].keys()]
 
+        print(cpu_nodes, gpu_nodes)
         dw = []
         for n in gpu_nodes:
             dw.append(Worker.options(resources={n: 0.01}))
@@ -780,7 +795,7 @@ def main():
     res = ray.cluster_resources()
     res_keys = res.keys()
 
-    local_hostname = ray.services.get_node_ip_address()
+    local_hostname = socket.gethostbyname(socket.gethostname())
     driver_node_id = 'node:'+local_hostname
     print(driver_node_id)
 
