@@ -50,7 +50,10 @@ spec1 = importlib.util.spec_from_file_location("module.name", "/datadrive/home/u
 dist_chk = importlib.util.module_from_spec(spec1)
 spec1.loader.exec_module(dist_chk)
 
-import data_loader
+spec2 = importlib.util.spec_from_file_location("module.name", "/datadrive/home/ubuntu/CheckFreq/distributed/data_loader.py")
+data_loader = importlib.util.module_from_spec(spec2)
+spec2.loader.exec_module(data_loader)
+
 
 try:
 		set_start_method('spawn')
@@ -98,7 +101,7 @@ def seed_everything(seed=42):
 
 @ray.remote(num_gpus=1, num_cpus=1, max_restarts=5, max_task_retries=-1)
 class Worker(object):
-    def __init__(self, idx, batch_size, td, num_ps, rocksdb_lat, model_name):
+    def __init__(self, idx, batch_size, td, num_ps, num_worker, rocksdb_lat, model_name, dali=False):
         os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
         print('CUBLAS: ', os.environ.get('CUBLAS_WORKSPACE_CONFIG'))
         seed_everything()
@@ -108,15 +111,18 @@ class Worker(object):
 
         self.criterion = nn.CrossEntropyLoss().cuda()
         self.batch_size = batch_size
+        #torch.cuda.set_device(0)
 
-        self.train_loader = ray.get(
-            td.get_data_loader.remote(batch_size, idx))  # data_loader
+        #self.train_loader = ray.get(
+        #    td.get_data_loader.remote(batch_size, idx, num_worker))  # data_loader
+        self.train_loader = td.get_data_loader(batch_size, idx, num_worker)
         self.data_iterator = iter(self.train_loader)
         self.device = torch.device(
             "cuda:0" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
         #self.batch_set = list(enumerate(self.train_loader))
         self.grad = []
+        self.dali = dali
 
         self.num_ps = num_ps
 
@@ -166,8 +172,14 @@ class Worker(object):
             batch = next(self.data_iterator)
 
             #batch = self.batch_set[it][1:]
-            [x, y] = batch[0]
-            x, y = x.to(self.device), y.to(self.device)
+            #print("-------------- batch: ", batch)
+            if self.dali:
+               x = batch[0]["data"]
+               y = batch[0]["label"].squeeze().cuda().long()
+               print(x, y)
+            else:
+               [x, y] = batch
+               x, y = x.to(self.device), y.to(self.device)
 
             self.set_weights(w_dict_torch)
             # self.model.eval() - TODO: fix this with resnet and vgg
@@ -500,7 +512,7 @@ class PSStrategy(object):
                  num_ps,
                  batch_size, freq, dl,
                  checkp_local, rocksdb_lat, model_name, collocated, 
-                 sync, profile, prof_steps):
+                 sync, profile, prof_steps, dali):
 
         self.num_ps = num_ps
         self.num_worker = num_worker
@@ -519,7 +531,7 @@ class PSStrategy(object):
         self.iter_dur = []
         self.prev_iter_mean = 0
         self.max_overhead = 5
-
+        self.dali = dali
 
         nodes_info = ray.nodes()
         cpu_nodes = ['node:' + n['NodeManagerAddress']
@@ -544,7 +556,7 @@ class PSStrategy(object):
         for j in range(self.num_worker):
             idx = j
             self.workers.append(dw[j].remote(
-                idx, batch_size, dl, self.num_ps, self.rocksdb_lat, self.model_name))
+                idx, batch_size, dl, self.num_ps, self.num_worker, self.rocksdb_lat, self.model_name, dali=self.dali))
 
         # spawn ps
         self.servers = []
@@ -707,7 +719,7 @@ def main():
     parser.add_argument('--num_servers', type=int, default=1,
                         help='Number of server processes')
     parser.add_argument('--worker_batch_size', type=int,
-                        default=64, help='Per-worker minibatch size')
+                        default=32, help='Per-worker minibatch size')
     parser.add_argument('--remote_check',  type=bool, default=False,
                         help='Whether to checkpoint locally or remotely (only S3 is supported for now)')
     parser.add_argument('--check_freq_iters', type=int, default=0,
@@ -751,6 +763,9 @@ def main():
     use_dali = args.use_dali
     data_path = args.data_path
 
+    traindir = os.path.join(data_path, 'train')
+    valdir = os.path.join(data_path, 'val')
+
     ray.init(address="auto")
 
     res = ray.cluster_resources()
@@ -768,14 +783,14 @@ def main():
     iter_per_epoch = math.ceil(train_size/train_batch_size)
 
     it = 0
-    loader1 = data_loader.td_loader.options(resources={driver_node_id: 0.01})
+    #loader1 = data_loader.td_loader.options(resources={driver_node_id: 0.01})
     ld=None
 
     if not use_dali:
         worker_data, validation_dataset = data_loader.split_data(num_workers)
-        ld = loader1.remote(worker_data=worker_data)
+        ld = data_loader.td_loader.remote(worker_data=worker_data)
     else:
-        ld = loader1.remote(use_dali=True, train_dir=data_path)
+        ld = data_loader.td_loader(dali=True, train_dir=traindir)
   
     print(ld)
 
@@ -786,7 +801,7 @@ def main():
         num_ps=num_servers,
         batch_size=train_batch_size, freq=check_freq_iters,
         dl=ld, checkp_local=local_check, rocksdb_lat=rocksdb_lat, model_name=model_name, collocated=collocated, 
-        sync=sync, profile=profile, prof_steps=prof_steps)
+        sync=sync, profile=profile, prof_steps=prof_steps, dali=use_dali)
 
     training_time = 0
     e_iters = math.floor(iter_per_epoch/num_workers)
@@ -803,7 +818,7 @@ def main():
     # for evaluation
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
-    test_loader = data_loader.get_val_data_loader(validation_dataset)
+    #test_loader = data_loader.get_val_data_loader(validation_dataset) # TODO: FIX validation!!!!!!
 
     check_time = 0
     j = 0

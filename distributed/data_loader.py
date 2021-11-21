@@ -58,6 +58,7 @@ class HybridTrainPipe(Pipeline):
     def __init__(self, batch_size, num_threads, device_id, data_dir, crop, local_rank, world_size, node_rank=0, nnodes=1, dali_cpu=False, resume_index=0, resume_epoch=0):
         super(HybridTrainPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
 
+        print(torch.version.cuda, device_id)
         shard = int(node_rank*world_size/nnodes + local_rank)
         #if args.mint:
         #    self.input = ops.FileReader(file_root=data_dir, shard_id=shard, num_shards=args.world_size, shuffle_after_epoch=True, cache_size=args.cache_size)
@@ -106,9 +107,11 @@ class HybridTrainPipe(Pipeline):
         return [output, self.labels]
 
 
-@ray.remote
+#@ray.remote(num_gpus=0.5)
 class td_loader(object):
     def __init__(self, worker_data=None, train_dir=None, dali=False):
+        #import torch
+        #torch.cuda.set_device(0)
         self.worker_data = worker_data
         self.train_dir = train_dir
         self.dali = dali
@@ -117,7 +120,8 @@ class td_loader(object):
         if self.dali:
             crop_size = 224
             val_size = 256
-            pipe = HybridTrainPipe(batch_size=train_batch_size, num_threads=0, device_id=idx, data_dir=self.train_dir, crop=crop_size)
+            pipe = HybridTrainPipe(batch_size=train_batch_size, num_threads=1, device_id=idx, data_dir=self.train_dir, crop=crop_size, local_rank=idx, world_size=world_size)
+            pipe.build()
             #resume_size = int(pipe.epoch_size("Reader") / world_size) - args.start_index
             start_index = 0 # TODO: fix this for resume!!
             resume_size = int(pipe.epoch_size("Reader") / world_size) - start_index
