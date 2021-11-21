@@ -50,8 +50,7 @@ spec1 = importlib.util.spec_from_file_location("module.name", "/datadrive/home/u
 dist_chk = importlib.util.module_from_spec(spec1)
 spec1.loader.exec_module(dist_chk)
 
-
-
+import data_loader
 
 try:
 		set_start_method('spawn')
@@ -65,57 +64,6 @@ def get_pid(name):
     n = n[:-1]
     return n
 
-
-def split_data(n_workers):
-    transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465),
-                             (0.2023, 0.1994, 0.2010)),
-    ])
-
-    transform_test = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465),
-                             (0.2023, 0.1994, 0.2010)),
-    ])
-    train_dataset = CIFAR10(
-        root="~/data", train=True, download=True, transform=transform_train)
-    validation_dataset = CIFAR10(
-        root="~/data", train=False, download=True, transform=transform_test)
-
-    temp = tuple([len(train_dataset)//n_workers for i in range(n_workers)])
-    print(temp)
-    worker_data = torch.utils.data.random_split(
-        train_dataset, temp) #generator=torch.Generator().manual_seed(42)) # Comment for running with PyTorch 1.1
-    print(len(worker_data))
-    return worker_data, validation_dataset
-
-
-def get_train_data_loader(worker_data, train_batch_size, idx):
-
-    print(len(worker_data), idx)
-    train_loader = DataLoader(
-        worker_data[idx], batch_size=train_batch_size, shuffle=True, num_workers=0, worker_init_fn=random.seed(42))  # should add num_workers here?
-    return train_loader
-
-
-def get_val_data_loader(validation_dataset):
-    validation_loader = DataLoader(
-        validation_dataset, batch_size=100, shuffle=False, num_workers=0, worker_init_fn=random.seed(42))
-    return validation_loader
-
-
-@ray.remote
-class td_loader(object):
-    def __init__(self, worker_data):
-        self.worker_data = worker_data
-
-    def get_data_loader(self, train_batch_size, idx):
-        train_loader = DataLoader(self.worker_data[idx], batch_size=train_batch_size, shuffle=True,
-                                  num_workers=0, worker_init_fn=random.seed(42))  # should add num_workers here?
-        return train_loader
 
 
 def evaluate(model, test_loader):
@@ -167,7 +115,7 @@ class Worker(object):
         self.device = torch.device(
             "cuda:0" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
-        self.batch_set = list(enumerate(self.train_loader))
+        #self.batch_set = list(enumerate(self.train_loader))
         self.grad = []
 
         self.num_ps = num_ps
@@ -214,24 +162,31 @@ class Worker(object):
         for k in weights.keys():
             w_dict_torch[k] = torch.from_numpy(weights[k])
 
-        batch = self.batch_set[it][1:]
-        [x, y] = batch[0]
-        x, y = x.to(self.device), y.to(self.device)
+        try:
+            batch = next(self.data_iterator)
 
-        self.set_weights(w_dict_torch)
-        # self.model.eval() - TODO: fix this with resnet and vgg
+            #batch = self.batch_set[it][1:]
+            [x, y] = batch[0]
+            x, y = x.to(self.device), y.to(self.device)
 
-        self.model.zero_grad()
-        output = self.model(x)
-        self.loss = self.criterion(output, y)
+            self.set_weights(w_dict_torch)
+            # self.model.eval() - TODO: fix this with resnet and vgg
 
-        self.loss.backward()
+            self.model.zero_grad()
+            output = self.model(x)
+            self.loss = self.criterion(output, y)
 
-        self.grad = self.get_gradients()
+            self.loss.backward()
+
+            self.grad = self.get_gradients()
+            return self.grad, self.loss.cpu().data.numpy(), it
+
+        except StopIteration:
+            print("Epoch ended!")
+            # TODO: iterator fix here! return value?????
 
         end_time = time.time()
 
-        return self.grad, self.loss.cpu().data.numpy(), it
 
     def split_gradients(self, grad, assignments):
         if grad is None:
@@ -772,7 +727,11 @@ def main():
     parser.add_argument('--prof_steps', type=int, default=100,
                         help='Number of profling steps')
     parser.add_argument('--profile', type=bool, default=False,
-                        help='Whether to profile for finding the checkpoint frequency or not')                    
+                        help='Whether to profile for finding the checkpoint frequency or not') 
+    parser.add_argument('--use_dali', type=bool, default=False,
+                        help='Whether to use the DALI (CoorDL) library for data preprocessing') 
+    parser.add_argument('--data_path', type=str, default="",
+                        help='Path to dataset. It must have subdirectories named "train" and "val";')                   
     args = parser.parse_args()
 
     print(args)
@@ -789,6 +748,8 @@ def main():
     sync = args.sync
     prof_steps = args.prof_steps
     profile  = args.profile
+    use_dali = args.use_dali
+    data_path = args.data_path
 
     ray.init(address="auto")
 
@@ -807,10 +768,15 @@ def main():
     iter_per_epoch = math.ceil(train_size/train_batch_size)
 
     it = 0
-    worker_data, validation_dataset = split_data(num_workers)
+    loader1 = data_loader.td_loader.options(resources={driver_node_id: 0.01})
+    ld=None
 
-    loader1 = td_loader.options(resources={driver_node_id: 0.01})
-    ld = loader1.remote(worker_data)
+    if not use_dali:
+        worker_data, validation_dataset = data_loader.split_data(num_workers)
+        ld = loader1.remote(worker_data=worker_data)
+    else:
+        ld = loader1.remote(use_dali=True, train_dir=data_path)
+  
     print(ld)
 
     workers = []
@@ -837,7 +803,7 @@ def main():
     # for evaluation
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
-    test_loader = get_val_data_loader(validation_dataset)
+    test_loader = data_loader.get_val_data_loader(validation_dataset)
 
     check_time = 0
     j = 0
