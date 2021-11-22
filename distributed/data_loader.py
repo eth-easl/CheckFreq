@@ -93,6 +93,8 @@ class HybridTrainPipe(Pipeline):
         print("Use dali data loader")
         print(torch.version.cuda, device_id)
         shard = int(node_rank*world_size/nnodes + local_rank)
+
+        print("-------------- shard is: ", shard)
         #if args.mint:
         #    self.input = ops.FileReader(file_root=data_dir, shard_id=shard, num_shards=args.world_size, shuffle_after_epoch=True, cache_size=args.cache_size)
         #else:
@@ -101,7 +103,7 @@ class HybridTrainPipe(Pipeline):
         #    cf_det=False
         #    self.input = ops.FileReader(file_root=data_dir, shard_id=shard, num_shards=world_size, shuffle_after_epoch=True)
         #else:
-        # TODO: check if this is what we want:
+        # shard based on: https://docs.nvidia.com/deeplearning/dali/archives/dali_0230_beta/user-guide/docs/examples/general/multigpu.html
         self.input = ops.FileReader(file_root=data_dir, shard_id=shard, num_shards=world_size, shuffle_after_epoch=True, resume_index=resume_index, resume_epoch=resume_epoch, cf_det=cf_det)    
         print("CF deterministic shuffling is {}".format(cf_det))
 
@@ -180,7 +182,7 @@ class td_loader(object):
         if self.dali:
             crop_size = 224
             val_size = 256
-            pipe = HybridTrainPipe(batch_size=train_batch_size, num_threads=3, device_id=idx, data_dir=self.train_dir, crop=crop_size, local_rank=idx, world_size=world_size)
+            pipe = HybridTrainPipe(batch_size=train_batch_size, num_threads=3, device_id=0, data_dir=self.train_dir, crop=crop_size, local_rank=idx, world_size=world_size)
             pipe.build()
             #resume_size = int(pipe.epoch_size("Reader") / world_size) - args.start_index
             start_index = 0 # TODO: fix this for resume!!
