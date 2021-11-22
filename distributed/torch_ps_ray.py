@@ -109,8 +109,8 @@ class Worker(object):
         seed_everything()
 
         self.model_name = model_name
-        #self.model = models.__dict__[self.model_name](num_classes=10) 
-        self.model = config_model.get_model_by_name(self.model_name)
+        self.model = models.__dict__[self.model_name](num_classes=10) 
+        #self.model = config_model.get_model_by_name(self.model_name)
 
         self.criterion = nn.CrossEntropyLoss().cuda()
         self.batch_size = batch_size
@@ -118,6 +118,8 @@ class Worker(object):
 
         #self.train_loader = ray.get(
         #    td.get_data_loader.remote(batch_size, idx, num_worker))  # data_loader
+        self.td = td
+        self.idx = idx
         self.train_loader = td.get_data_loader(batch_size, idx, num_worker)
         self.data_iterator = iter(self.train_loader)
         self.device = torch.device(
@@ -128,7 +130,7 @@ class Worker(object):
         self.dali = dali
 
         self.num_ps = num_ps
-
+        self.num_workers = num_worker
         self.sleep_read = 0.0
         self.sleep_write = 0.0  # 0.7
         # self.sleep_write = 0.0 #0.5 #2.4
@@ -173,36 +175,36 @@ class Worker(object):
 
         try:
             batch = next(self.data_iterator)
-
-            #batch = self.batch_set[it][1:]
-            #print("-------------- batch: ", batch)
-            if self.dali:
-               x = batch[0]["data"]
-               y = batch[0]["label"].squeeze().cuda().long()
-               #print(x,y)
-            else:
-               [x, y] = batch
-               x, y = x.to(self.device), y.to(self.device)
-               #print(x,y)
-
-            self.set_weights(w_dict_torch)
-            # self.model.eval() - TODO: fix this with resnet and vgg
-
-            self.model.zero_grad()
-            #input_var = Variable(x)
-            output = self.model(x)
-            self.loss = self.criterion(output, y)
-
-            self.loss.backward()
-
-            self.grad = self.get_gradients()
-            return self.grad, self.loss.cpu().data.numpy(), it
-
         except StopIteration:
-            print("Epoch ended!")
-            # TODO: iterator fix here! return value?????
+            print("--------------------------------- Epoch ended!!!")
+            if self.dali:
+                self.data_iterator.reset() # TODO: maybe change seeds here? Is this the same for native data loader?
+            else:
+                self.train_loader = self.td.get_data_loader(self.batch_size, self.idx, self.num_workers)
+                self.data_iterator = iter(self.train_loader)
+            batch = next(self.data_iterator)
 
-        end_time = time.time()
+        if self.dali:
+            x = batch[0]["data"]
+            y = batch[0]["label"].squeeze().cuda().long()
+        else:
+            [x, y] = batch
+            x, y = x.to(self.device), y.to(self.device)
+
+        self.set_weights(w_dict_torch)
+        # self.model.eval() - TODO: fix this with resnet and vgg
+
+        self.model.zero_grad()
+        #input_var = Variable(x)
+        output = self.model(x)
+        self.loss = self.criterion(output, y)
+
+        self.loss.backward()
+
+        self.grad = self.get_gradients()
+        return self.grad, self.loss.cpu().data.numpy(), it
+
+
 
 
     def split_gradients(self, grad, assignments):
@@ -782,7 +784,8 @@ def main():
 
     os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
     seed_everything()
-    model = config_model.get_model_by_name(model_name)
+    #model = config_model.get_model_by_name(model_name)
+    model = models.__dict__[model_name](num_classes=10)
 
     train_size = 50000  # for CIFAR10
     iter_per_epoch = math.ceil(train_size/train_batch_size)
@@ -853,7 +856,7 @@ def main():
         current_weights = strategy.get_weights()
         training_time += (time.time()-start)
         tt = time.time()-start
-        model.set_weights(current_weights)
+        #model.set_weights(current_weights)
         start_time = time.time()
         accuracy = 0 #evaluate(model, test_loader)
         end_time = time.time()
@@ -864,7 +867,7 @@ def main():
         start = time.time()
 
     strategy.clean()
-    f = open('/home/ubuntu/CheckFreq/distributed/output.txt', 'a')
+    f = open('/datadrive/home/ubuntu/CheckFreq/distributed/output.txt', 'a')
     wr = "Iters: " + str(e_iters) + ", Freq: " + str(check_freq_iters) + ", Num workers: " + str(num_workers) + ", Num servers: " + str(num_servers) + \
         " , accuracy: " + str(accuracy) + " , time: " + str(training_time) + \
         " , killed: " + str(killed) + " , check time: " + \
