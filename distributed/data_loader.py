@@ -4,6 +4,7 @@ from torchvision import transforms
 from torchvision.datasets import CIFAR10
 import random
 import ray
+import torchvision.datasets as datasets
 
 try:
     from nvidia.dali.plugin.pytorch import DALIClassificationIterator
@@ -15,7 +16,7 @@ except ImportError:
 
 def split_data(n_workers):
     transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
+        transforms.RandomCrop(224, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize((0.4914, 0.4822, 0.4465),
@@ -39,6 +40,22 @@ def split_data(n_workers):
     print(len(worker_data))
     return worker_data, validation_dataset
 
+def native_loader(traindir, train_batch_size):
+    print("use Native Data loader")
+    normalize = transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
+                                    std=[0.2023, 0.1994, 0.2010])
+    train_dataset = datasets.ImageFolder(
+           traindir,
+           transforms.Compose([
+             transforms.RandomResizedCrop(224),
+             transforms.RandomHorizontalFlip(),
+             transforms.ToTensor(),
+             normalize,
+    ]))
+    train_loader = DataLoader(
+             train_dataset, batch_size=train_batch_size, shuffle=True,
+             num_workers=3, pin_memory=True)
+    return train_loader
 
 def get_train_data_loader(worker_data, train_batch_size, idx):
 
@@ -58,6 +75,7 @@ class HybridTrainPipe(Pipeline):
     def __init__(self, batch_size, num_threads, device_id, data_dir, crop, local_rank, world_size, node_rank=0, nnodes=1, dali_cpu=False, resume_index=0, resume_epoch=0):
         super(HybridTrainPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
 
+        print("Use dali data loader")
         print(torch.version.cuda, device_id)
         shard = int(node_rank*world_size/nnodes + local_rank)
         #if args.mint:
@@ -120,14 +138,15 @@ class td_loader(object):
         if self.dali:
             crop_size = 224
             val_size = 256
-            pipe = HybridTrainPipe(batch_size=train_batch_size, num_threads=1, device_id=idx, data_dir=self.train_dir, crop=crop_size, local_rank=idx, world_size=world_size)
+            pipe = HybridTrainPipe(batch_size=train_batch_size, num_threads=3, device_id=idx, data_dir=self.train_dir, crop=crop_size, local_rank=idx, world_size=world_size)
             pipe.build()
             #resume_size = int(pipe.epoch_size("Reader") / world_size) - args.start_index
             start_index = 0 # TODO: fix this for resume!!
             resume_size = int(pipe.epoch_size("Reader") / world_size) - start_index
             train_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / world_size), fill_last_batch=False, resume_size=resume_size)
         else:
-            train_loader = DataLoader(self.worker_data[idx], batch_size=train_batch_size, shuffle=True,
-                                        num_workers=0, worker_init_fn=random.seed(42))  # should add num_workers here?
+            train_loader = native_loader(self.train_dir, train_batch_size)
+            #train_loader = DataLoader(self.worker_data[idx], batch_size=train_batch_size, shuffle=True,
+            #                            num_workers=0, worker_init_fn=random.seed(42))  # should add num_workers here?
         return train_loader
 

@@ -16,6 +16,7 @@ from filelock import FileLock
 from torchvision import transforms
 from torchvision.datasets import CIFAR10
 from torch.utils.data import DataLoader, Subset
+import torchvision.models as models
 #import ray.services
 #import boto3
 import io
@@ -38,6 +39,7 @@ import socket
 #import cause_node_fails
 #from dist_chk import CFCheckpoint
 from statistics import mean
+import torchvision.datasets as datasets
 
 
 ### import issues! ###
@@ -107,6 +109,7 @@ class Worker(object):
         seed_everything()
 
         self.model_name = model_name
+        #self.model = models.__dict__[self.model_name](num_classes=10) 
         self.model = config_model.get_model_by_name(self.model_name)
 
         self.criterion = nn.CrossEntropyLoss().cuda()
@@ -176,15 +179,17 @@ class Worker(object):
             if self.dali:
                x = batch[0]["data"]
                y = batch[0]["label"].squeeze().cuda().long()
-               print(x, y)
+               #print(x,y)
             else:
                [x, y] = batch
                x, y = x.to(self.device), y.to(self.device)
+               #print(x,y)
 
             self.set_weights(w_dict_torch)
             # self.model.eval() - TODO: fix this with resnet and vgg
 
             self.model.zero_grad()
+            #input_var = Variable(x)
             output = self.model(x)
             self.loss = self.criterion(output, y)
 
@@ -787,8 +792,8 @@ def main():
     ld=None
 
     if not use_dali:
-        worker_data, validation_dataset = data_loader.split_data(num_workers)
-        ld = data_loader.td_loader.remote(worker_data=worker_data)
+        #worker_data, validation_dataset = data_loader.split_data(num_workers)
+        ld = data_loader.td_loader(train_dir=traindir)
     else:
         ld = data_loader.td_loader(dali=True, train_dir=traindir)
   
