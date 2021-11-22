@@ -57,6 +57,21 @@ def native_loader(traindir, train_batch_size):
              num_workers=3, pin_memory=True)
     return train_loader
 
+
+def val_native_loader(valdir, val_batch_size):
+    normalize = transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
+                                    std=[0.2023, 0.1994, 0.2010])   
+    val_loader = DataLoader(
+            datasets.ImageFolder(valdir, transforms.Compose([
+               transforms.Resize(256),
+               transforms.CenterCrop(224),
+               transforms.ToTensor(),
+               normalize,
+            ])), batch_size=val_batch_size, shuffle=False, num_workers=3, pin_memory=True)
+    print(len(val_loader)) 
+    return val_loader
+
+
 def get_train_data_loader(worker_data, train_batch_size, idx):
 
     print(len(worker_data), idx)
@@ -125,13 +140,40 @@ class HybridTrainPipe(Pipeline):
         return [output, self.labels]
 
 
+class HybridValPipe(Pipeline):
+    def __init__(self, batch_size, num_threads, device_id, data_dir, crop, size, node_rank=0, world_size=1, nnodes=1, local_rank=0): # for now. just validate on head node
+
+        super(HybridValPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
+
+        shard = int(node_rank*world_size/nnodes + local_rank)
+
+        self.input = ops.FileReader(file_root=data_dir, shard_id=shard, num_shards=world_size, random_shuffle=False)
+        self.decode = ops.ImageDecoder(device="cpu", output_type=types.RGB)
+        self.res = ops.Resize(device="cpu", resize_shorter=size, interp_type=types.INTERP_TRIANGULAR)
+        self.cmnp = ops.CropMirrorNormalize(device="gpu",
+                                            output_dtype=types.FLOAT,
+                                            output_layout=types.NCHW,
+                                            crop=(crop, crop),
+                                            image_type=types.RGB,
+                                            mean=[0.4914 * 255, 0.4822 * 255, 0.4465 * 255],
+                                            std=[0.2023 * 255, 0.1994 * 255, 0.2010 * 255])
+
+    def define_graph(self):
+        self.jpegs, self.labels = self.input(name="Reader")
+        images = self.decode(self.jpegs)
+        images = self.res(images)
+        output = self.cmnp(images.gpu())
+        return [output, self.labels]
+
+
 #@ray.remote(num_gpus=0.5)
 class td_loader(object):
-    def __init__(self, worker_data=None, train_dir=None, dali=False):
+    def __init__(self, worker_data=None, train_dir=None, val_dir=None, dali=False):
         #import torch
         #torch.cuda.set_device(0)
         self.worker_data = worker_data
         self.train_dir = train_dir
+        self.val_dir = val_dir
         self.dali = dali
 
     def get_data_loader(self, train_batch_size, idx, world_size):
@@ -149,4 +191,17 @@ class td_loader(object):
             #train_loader = DataLoader(self.worker_data[idx], batch_size=train_batch_size, shuffle=True,
             #                            num_workers=0, worker_init_fn=random.seed(42))  # should add num_workers here?
         return train_loader
+
+
+    def get_val_loader(self, val_batch_size, idx, world_size):
+       if self.dali:
+          crop_size = 224
+          val_size = 256
+          pipe_val = HybridValPipe(batch_size=val_batch_size, num_threads=3, device_id=idx, data_dir=self.val_dir, crop=crop_size, size=val_size)
+          pipe_val.build()
+          val_loader = DALIClassificationIterator(pipe_val, size=int(pipe_val.epoch_size("Reader") / world_size))
+       else:
+          val_loader = val_native_loader(self.val_dir, val_batch_size)
+       return val_loader
+      
 

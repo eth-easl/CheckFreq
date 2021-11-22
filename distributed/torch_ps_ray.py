@@ -792,13 +792,8 @@ def main():
 
     it = 0
     #loader1 = data_loader.td_loader.options(resources={driver_node_id: 0.01})
-    ld=None
-
-    if not use_dali:
-        #worker_data, validation_dataset = data_loader.split_data(num_workers)
-        ld = data_loader.td_loader(train_dir=traindir)
-    else:
-        ld = data_loader.td_loader(dali=True, train_dir=traindir)
+    
+    ld = data_loader.td_loader(dali=use_dali, train_dir=traindir, val_dir=valdir)
   
     print(ld)
 
@@ -826,7 +821,7 @@ def main():
     # for evaluation
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
-    #test_loader = data_loader.get_val_data_loader(validation_dataset) # TODO: FIX validation!!!!!!
+    test_loader = ld.get_val_loader(train_batch_size, 0, 1)
 
     check_time = 0
     j = 0
