@@ -1,10 +1,11 @@
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, SubsetRandomSampler
 from torchvision import transforms
 from torchvision.datasets import CIFAR10
 import random
 import ray
 import torchvision.datasets as datasets
+import numpy as np
 
 try:
     from nvidia.dali.plugin.pytorch import DALIClassificationIterator
@@ -40,7 +41,7 @@ def split_data(n_workers):
     print(len(worker_data))
     return worker_data, validation_dataset
 
-def native_loader(traindir, train_batch_size):
+def native_loader(traindir, train_batch_size, total=False, start_idx=0, end_idx=0):
     print("use Native Data loader")
     normalize = transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
                                     std=[0.2023, 0.1994, 0.2010])
@@ -52,9 +53,19 @@ def native_loader(traindir, train_batch_size):
              transforms.ToTensor(),
              normalize,
     ]))
-    train_loader = DataLoader(
-             train_dataset, batch_size=train_batch_size, shuffle=True,
-             num_workers=3, pin_memory=True)
+
+    if total:
+        train_loader = DataLoader(
+                 train_dataset, batch_size=train_batch_size, shuffle=True,
+                 num_workers=3, pin_memory=True)
+    else:
+        print("indices: ", start_idx, end_idx)
+        a = [start_idx, end_idx]
+        sampler = SubsetRandomSampler(np.arange(*a)) #generator=torch.Generator().manual_seed(42))
+        train_loader = DataLoader(
+                 train_dataset, batch_size=train_batch_size, shuffle=False,
+                 num_workers=3, pin_memory=True, sampler=sampler)
+
     return train_loader
 
 
@@ -189,7 +200,16 @@ class td_loader(object):
             resume_size = int(pipe.epoch_size("Reader") / world_size) - start_index
             train_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / world_size), fill_last_batch=False, resume_size=resume_size)
         else:
-            train_loader = native_loader(self.train_dir, train_batch_size)
+            base_loader = native_loader(self.train_dir, train_batch_size, total=True)
+            part = int(len(base_loader)/world_size)
+            print("----------- per worker part is: ", part, " base loader has length: ", len(base_loader))
+            start_idx = idx * part 
+            end_idx = start_idx + part 
+            start_idx *= train_batch_size
+            end_idx *= train_batch_size
+            if (idx == world_size -1):
+                end_idx = 50000 #TODO: make generic (this is for CIFAR10)
+            train_loader = native_loader(self.train_dir, train_batch_size, total=False, start_idx=start_idx, end_idx=end_idx)
             #train_loader = DataLoader(self.worker_data[idx], batch_size=train_batch_size, shuffle=True,
             #                            num_workers=0, worker_init_fn=random.seed(42))  # should add num_workers here?
         return train_loader
