@@ -71,7 +71,7 @@ def get_pid(name):
 
 
 
-def evaluate(model, test_loader):
+def evaluate(model, test_loader, dali):
     """Evaluates the accuracy of the model on a validation dataset."""
     model.eval()
     correct = 0
@@ -79,8 +79,14 @@ def evaluate(model, test_loader):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     with torch.no_grad():
-        for batch_idx, (data, target) in enumerate(test_loader):
-            data, target = data.to(device), target.to(device)
+        for batch_idx, d in enumerate(test_loader):
+            if dali:
+               data = d[0]["data"]
+               target = d[0]["label"].squeeze().cuda().long()
+               #print(data, target)
+            else:
+               data, target = d
+               data, target = data.to(device), target.to(device)
             # This is only set to finish evaluation faster.
             # if batch_idx * len(data) > 1024:
             #    break
@@ -263,6 +269,16 @@ class Worker(object):
         return grad_dict
 
 
+    def model_eval(self, ld):
+
+        test_loader = ld.get_val_loader(self.batch_size, 0, 1)
+        acc = evaluate(self.model, test_loader, self.dali)
+        return acc
+
+
+    def reset(self):
+        self.model.train() # not really sure if this is needed
+
 @ray.remote(num_cpus=1, max_restarts=-1, max_task_retries=-1)
 class PS(object):
     def __init__(self, idx, freq, num_ps, checkp_local, rocksdb_lat, model_name, synchronous):
@@ -348,7 +364,7 @@ class PS(object):
         self.params = params
         if ('resnet' in self.model_name):
             self.optimizer = torch.optim.SGD(
-                self.params.values(), lr=0.01, momentum=0.9, weight_decay=5e-4)
+                self.params.values(), lr=0.1, momentum=0.9, weight_decay=5e-4)
         else:
             self.optimizer = torch.optim.SGD(
                 self.params.values(), lr=0.01, momentum=0.9)
@@ -374,7 +390,6 @@ class PS(object):
                 t += torch.from_numpy(list_of_gradients[i][name])
             summed_gradient_dict[name] = t
 
-	
 
         self.optimizer.zero_grad()
 
@@ -600,12 +615,17 @@ class PSStrategy(object):
             this_shard_id = self.workers[0].index_shard.remote(shard_ids, i)
             ray.wait([server.set_params.remote(this_shard_id)])
 
+    def evaluate(self, ld):
+        ret = ray.get(self.workers[0].model_eval.remote(ld))
+        return ret
+
     def get_weights(self):
         model_weights = ray.get(self.workers[0].get_state.remote())
         return model_weights
 
     def reset(self):
         ray.get([ps.reset.remote() for ps in self.servers])
+        ray.get([w.reset.remote() for w in self.workers])
 
     def clean(self):
         ray.get([ps.join_proc.remote() for ps in self.servers])
@@ -853,9 +873,10 @@ def main():
         tt = time.time()-start
         #model.set_weights(current_weights)
         start_time = time.time()
-        accuracy = 0 #evaluate(model, test_loader)
+        accuracy = strategy.evaluate(ld)
         end_time = time.time()
         th = train_size/tt
+        print("---------------------------- Accuracy is: ", accuracy, " ----------------------------")
         w = "Freq: " + str(check_freq_iters) + ", Num workers: " + str(num_workers) + ", Num servers: " + str(num_servers) + " , accuracy: " + \
             str(accuracy) + " , time: " + str(training_time) + " , killed: " + \
             str(killed) + " , check time: " + str(check_time) + "\n"
