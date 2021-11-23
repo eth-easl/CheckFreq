@@ -439,7 +439,7 @@ class PS(object):
         
         skeys = list(self.optimizer.state_dict()['state'].keys())
         k = skeys[-1]
-        print("---- from PS, MODEL: ", 'linear.weight', self.params['linear.weight'])
+        #print("---- from PS, MODEL: ", 'linear.weight', self.params['linear.weight'])
         #print("---- from PS, OPT: ", k, self.optimizer.state_dict()['state'][k])
 
         if self.chk is None:
