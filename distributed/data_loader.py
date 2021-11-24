@@ -190,6 +190,7 @@ class td_loader(object):
         self.dali = dali
 
     def get_data_loader(self, train_batch_size, idx, world_size, start_idx, start_epoch):
+        print("---------------- get data loader! resume from: ", start_epoch, start_idx)
         if self.dali:
             crop_size = 224
             val_size = 256

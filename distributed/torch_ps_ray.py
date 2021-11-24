@@ -106,7 +106,7 @@ def seed_everything(seed=42):
 
 @ray.remote(num_gpus=1, num_cpus=1, max_restarts=5, max_task_retries=-1)
 class Worker(object):
-    def __init__(self, idx, batch_size, td, num_ps, num_worker, rocksdb_lat, model_name, dali=False):
+    def __init__(self, idx, batch_size, train_dir, num_ps, num_worker, rocksdb_lat, model_name, dali=False):
         os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
         print('CUBLAS: ', os.environ.get('CUBLAS_WORKSPACE_CONFIG'))
         seed_everything()
@@ -121,9 +121,10 @@ class Worker(object):
 
         #self.train_loader = ray.get(
         #    td.get_data_loader.remote(batch_size, idx, num_worker))  # data_loader
-        self.td = td
+        self.td = data_loader.td_loader(dali=dali, train_dir=train_dir)
+
         self.idx = idx
-        self.train_loader = td.get_data_loader(batch_size, idx, num_worker, 0, 0)
+        self.train_loader = self.td.get_data_loader(batch_size, idx, num_worker, 0, 0)
         self.data_iterator = iter(self.train_loader)
         self.device = torch.device(
             "cuda:0" if torch.cuda.is_available() else "cpu")
@@ -138,6 +139,8 @@ class Worker(object):
         self.sleep_write = 0.0  # 0.7
         # self.sleep_write = 0.0 #0.5 #2.4
         self.rocksdb_lat = rocksdb_lat
+
+        self.loader_idx = 0 # this is used for indexing the data loader
 
     def ready(self):
         return
@@ -158,10 +161,18 @@ class Worker(object):
         start_time = time.time()
         it = i
         epoch = ep
+
         for p in params:
             it = min(it, p['it'])
             p.pop('it')
             epoch = min(epoch, p['epoch'])
+            p.pop('epoch')
+
+        print("indexes: ", self.loader_idx, it, i)
+
+        if (it < 0):
+            return self.grad, 0, it
+
 
         if (it < i):  # a failure
             print("----------------------- a failure is detected! roll back to: ", it)
@@ -170,10 +181,16 @@ class Worker(object):
             if not self.dali:
                 for _ in range(it): # just skip these iterations
                     next(self.data_iterator)
+            self.loader_idx = it+1
             return None, None, it
 
-        if (it < 0):
-            return self.grad, 0, it
+        if (self.loader_idx == 0 and it > 1):
+            print("----------------------- The worker process failed! Roll data loaders back to: ", it)
+            # start from zero 
+            for _ in range(it): # just skip these iterations
+               next(self.data_iterator)
+            self.loader_idx = it
+
 
         weights = self.stitch_parameters(*params)
 
@@ -212,6 +229,7 @@ class Worker(object):
         self.loss.backward()
 
         self.grad = self.get_gradients()
+        self.loader_idx = it
         return self.grad, self.loss.cpu().data.numpy(), it
 
     def split_gradients(self, grad, assignments):
@@ -330,7 +348,8 @@ class PS(object):
         else:
                 # in order to check reloading, don't delete files in the normal setup.
                 # Need to explicitely handle folder cleaning after each experiment
-                self.restore()
+                self.restore() 
+                self.reloaded=True
                 
         print("start from: ", self.start_epoch, self.it)
 
@@ -522,22 +541,25 @@ class PS(object):
     def restore(self):
         files = filter( os.path.isfile, glob.glob(self.dirpath + '*'))
         files = sorted(files, key=os.path.getmtime) # TODO: checkthis, sort ascending according to time
+        print("--------------------- files: ", files)
         if len(files) == 0:
             return
 
         try:
-            self.load_checkpoint(files[:-1])
+            self.load_checkpoint(files[-1])
         except RuntimeError:    # latest file corrupted, try the second
-            self.load_checkpoint(files[:-2])
+            self.load_checkpoint(files[-2])
         
 
     def load_checkpoint(self, checkpoint_path):
+        print(checkpoint_path)
         checkpoint = torch.load(checkpoint_path)
         self.params = checkpoint['model']
         self.set_params(self.params)
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.start_epoch = checkpoint['epoch']
         self.it = checkpoint['iter']
+      
 
     def join_proc(self):
         if self.chk_process is not None:
@@ -547,15 +569,16 @@ class PS(object):
                     os.system("kill -9 " + str(pid))
                 print("-------------- Killed!")
 
-
+    def get_stats(self):
+        return self.start_epoch, self.it 
 
 class PSStrategy(object):
     def __init__(self,
                  num_worker,
                  num_ps,
-                 batch_size, freq, dl,
+                 batch_size, freq,
                  checkp_local, rocksdb_lat, model_name, collocated, 
-                 sync, profile, prof_steps, dali):
+                 sync, profile, prof_steps, dali, train_dir):
 
         self.num_ps = num_ps
         self.num_worker = num_worker
@@ -599,7 +622,7 @@ class PSStrategy(object):
         for j in range(self.num_worker):
             idx = j
             self.workers.append(dw[j].remote(
-                idx, batch_size, dl, self.num_ps, self.num_worker, self.rocksdb_lat, self.model_name, dali=self.dali))
+                idx, batch_size, train_dir, self.num_ps, self.num_worker, self.rocksdb_lat, self.model_name, dali=self.dali))
 
         # spawn ps
         self.servers = []
@@ -698,6 +721,14 @@ class PSStrategy(object):
 
         self.iter_dir = []
         self.monitor_iter = 0 
+
+    def resume(self, iters_per_epoch):
+        [start_epoch, start_it] = ray.get(self.servers[0].get_stats.remote())
+        if (start_it == iters_per_epoch - 1):
+            start_epoch += 1
+            start_it = 0
+        return start_epoch, start_it+1
+ 
 
     def step(self, epoch, it, nw):
         # stitch parameters
@@ -844,8 +875,8 @@ def main():
         num_worker=num_workers,
         num_ps=num_servers,
         batch_size=train_batch_size, freq=check_freq_iters,
-        dl=ld, checkp_local=local_check, rocksdb_lat=rocksdb_lat, model_name=model_name, collocated=collocated, 
-        sync=sync, profile=profile, prof_steps=prof_steps, dali=use_dali)
+        checkp_local=local_check, rocksdb_lat=rocksdb_lat, model_name=model_name, collocated=collocated, 
+        sync=sync, profile=profile, prof_steps=prof_steps, dali=use_dali, train_dir=traindir)
 
     training_time = 0
     e_iters = math.floor(iter_per_epoch/num_workers)
@@ -865,8 +896,12 @@ def main():
     test_loader = ld.get_val_loader(train_batch_size, 0, 1)
 
     check_time = 0
-    j = 0
-    for i in range(epochs):
+   
+    
+    start_epoch, start_iter = strategy.resume(e_iters)
+    j = start_iter
+
+    for i in range(start_epoch, epochs):
         strategy.reset()
         while j < e_iters:
             print("Iteration: ", j)
