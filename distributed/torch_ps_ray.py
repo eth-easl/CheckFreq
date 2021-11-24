@@ -32,7 +32,7 @@ import socket
 #import vgg_torch
 #import resnet
 #import config_model
-#import cause_node_fails
+import cause_node_fails
 #from dist_chk import CFCheckpoint
 from statistics import mean
 import torchvision.datasets as datasets
@@ -174,7 +174,6 @@ class Worker(object):
             epoch = min(epoch, p['epoch'])
             p.pop('epoch')
 
-        print("indexes: ", self.loader_idx, it, i)
 
         if (it < 0):
             return self.grad, 0, it
@@ -367,7 +366,6 @@ class PS(object):
         self.store = 0
         self.load = 0
 
-        time.sleep(2)
 
         self.dirpath = '/datadrive/home/ubuntu/CheckFreq/distributed/checkpoint/'
         if not os.path.isdir(self.dirpath):
@@ -377,7 +375,7 @@ class PS(object):
                 # Need to explicitely handle folder cleaning after each experiment
                 self.restore() 
                 self.reloaded=True
-                
+                               
         print("start from: ", self.start_epoch, self.it)
 
     def reset(self):
@@ -610,6 +608,12 @@ class PS(object):
     def get_metrics(self):
         return [self.store, self.load]
 
+    def clean(self):
+        for filename in os.listdir(self.dirpath):
+            file_path = os.path.join(self.dirpath, filename)
+            os.remove(file_path)
+
+
 class PSStrategy(object):
     def __init__(self,
                  num_worker,
@@ -712,6 +716,7 @@ class PSStrategy(object):
 
     def clean(self):
         ray.get([ps.join_proc.remote() for ps in self.servers])
+        ray.get([ps.clean.remote() for ps in self.servers])
 
     def do_prof(self, epoch, itr):
         print(self.iter_dur)
@@ -832,9 +837,15 @@ class PSStrategy(object):
         ret = [ps.apply_updates.remote(
             epoch, itr, *ps_grad_mappings[i]) for i, ps in enumerate(self.servers)]
 
+       
+
         print("----------------------------------------------------------------------------------")
         ray.get(ret)
         endit = time.time()
+        
+        if (epoch==0 and it==0):
+            self.init_checkpoint()
+
         check_time=0
         if (self.profile and (not self.prof_done) and it >= 5 and it < self.prof_steps): # collect statistics for the iteration time
             print("---------- Profile step: ", it)
@@ -970,7 +981,7 @@ def main():
     last = start
     killed = 0
 
-    time_int = 50  # time between consecutive fails (in sec)
+    time_int = 300  # time between consecutive fails (in sec)
 
     # for evaluation
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -983,10 +994,10 @@ def main():
     start_epoch, start_iter = strategy.resume(e_iters)
     j = start_iter
 
-    strategy.init_checkpoint()
+    #strategy.init_checkpoint()
     for i in range(start_epoch, epochs):
         strategy.reset()
-        while j < 100: #e_iters:
+        while j < 5: #e_iters:
             print("Iteration: ", j)
             j, chtime = strategy.step(i, j, num_workers)
             check_time += chtime
@@ -994,7 +1005,7 @@ def main():
             if (killed < num_kills):
                 if ((time.time() - last) >= time_int):
                     # remove a node (make sure it is not the driver)
-                    cause_node_fails.remove_node(local_hostname)
+                    cause_node_fails.remove_server_node(local_hostname)
 
                     killed += 1
                     last = time.time()
