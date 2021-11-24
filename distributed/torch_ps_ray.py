@@ -806,6 +806,8 @@ class PSStrategy(object):
        return [total_time, ttrain, tstore, tresched, tload, tredo]
        
 
+    def init_checkpoint(self):
+        ray.get([ps.store_checkpoint.remote(0, 0) for ps in self.servers])
 
     def step(self, epoch, it, nw):
         # stitch parameters
@@ -981,6 +983,7 @@ def main():
     start_epoch, start_iter = strategy.resume(e_iters)
     j = start_iter
 
+    strategy.init_checkpoint()
     for i in range(start_epoch, epochs):
         strategy.reset()
         while j < 100: #e_iters:
