@@ -4,6 +4,8 @@ import logging
 import os
 import signal
 import subprocess
+from scipy.stats import rv_continuous
+import numpy as np
 
 logging.basicConfig(format='%(asctime)s %(levelname)-4s [%(filename)s] %(message)s',
                     level=logging.DEBUG)
@@ -17,6 +19,7 @@ parser.add_argument('--stdout', type=str, default='stdout',
                     help='prefix for stdout files')
 parser.add_argument('--stderr', type=str, default='stderr',
                     help='prefix for stdout files')
+parser.add_argument('--goog', action='store_true')
 parser.add_argument('cmd', nargs=argparse.REMAINDER,
                     help='command to run after --')
 args = parser.parse_args()
@@ -28,17 +31,35 @@ if len(args.cmd) == 0 or args.cmd[0] != '--':
 cmd = ' '.join(args.cmd[1:])
 logger.info("Command to be executed: {}".format(cmd))
 
+class failure_dist(rv_continuous):
+    def __init__(self, t1, t2, b, A):
+        super().__init__(a=0)
+        self.t1 = t1
+        self.t2 = t2
+        self.b = b
+        self.A = A
+
+    def _cdf(self, t):
+        return self.A * (1 - np.exp(-t / self.t1) + np.exp((t - self.b) / self.t2))
+
 crash_count = 0
+interval = args.interval
+f_fail = failure_dist(t1=1.0, t2=0.8, A=0.5, b=24)
+
 while True:
+    if (args.goog):
+        interval = f_fail.rvs() / 24 * 60 # scale to 1hr
+
     stdoutfile = "{}.{}".format(args.stdout, crash_count)
     stderrfile = "{}.{}".format(args.stderr, crash_count)
+    logger.info("Crash {} after {} sec.".format(crash_count, interval))
     logger.info("Redirecting stdout to {}, stderr to {}".format(stdoutfile, stderrfile))
     stdoutfd = open(stdoutfile, 'w')
     stderrfd = open(stderrfile, 'w')
     proc = subprocess.Popen(cmd, shell=True, stdout=stdoutfd,
                             stderr=stderrfd, start_new_session=True)
     try:
-        time.sleep(args.interval)
+        time.sleep(interval)
     except KeyboardInterrupt:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         raise
