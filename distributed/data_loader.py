@@ -189,14 +189,14 @@ class td_loader(object):
         self.val_dir = val_dir
         self.dali = dali
 
-    def get_data_loader(self, train_batch_size, idx, world_size):
+    def get_data_loader(self, train_batch_size, idx, world_size, start_idx, start_epoch):
         if self.dali:
             crop_size = 224
             val_size = 256
-            pipe = HybridTrainPipe(batch_size=train_batch_size, num_threads=3, device_id=0, data_dir=self.train_dir, crop=crop_size, local_rank=idx, world_size=world_size)
+            pipe = HybridTrainPipe(batch_size=train_batch_size, num_threads=3, device_id=0, data_dir=self.train_dir, crop=crop_size, local_rank=idx, world_size=world_size, resume_index=start_idx, resume_epoch=start_epoch)
             pipe.build()
             #resume_size = int(pipe.epoch_size("Reader") / world_size) - args.start_index
-            start_index = 0 # TODO: fix this for resume!!
+            start_index = start_idx # TODO: fix this for resume!!
             resume_size = int(pipe.epoch_size("Reader") / world_size) - start_index
             train_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / world_size), fill_last_batch=False, resume_size=resume_size)
         else:

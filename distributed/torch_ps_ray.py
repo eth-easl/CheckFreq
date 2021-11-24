@@ -17,16 +17,12 @@ from torchvision import transforms
 from torchvision.datasets import CIFAR10
 from torch.utils.data import DataLoader, Subset
 import torchvision.models as models
-#import ray.services
-#import boto3
 import io
-#from boto3.s3.transfer import TransferConfig
 import threading
 import sys
 import random
 import math
 import time
-#import botocore
 
 import argparse
 from torch.multiprocessing import Pool, Process, set_start_method, Manager, Value, Lock
@@ -40,6 +36,7 @@ import socket
 #from dist_chk import CFCheckpoint
 from statistics import mean
 import torchvision.datasets as datasets
+import glob
 
 
 ### import issues! ###
@@ -126,7 +123,7 @@ class Worker(object):
         #    td.get_data_loader.remote(batch_size, idx, num_worker))  # data_loader
         self.td = td
         self.idx = idx
-        self.train_loader = td.get_data_loader(batch_size, idx, num_worker)
+        self.train_loader = td.get_data_loader(batch_size, idx, num_worker, 0, 0)
         self.data_iterator = iter(self.train_loader)
         self.device = torch.device(
             "cuda:0" if torch.cuda.is_available() else "cpu")
@@ -156,16 +153,23 @@ class Worker(object):
         return distribution
 
     @ray.method(num_returns=3)
-    def compute_gradients(self, i, *params):
+    def compute_gradients(self, i, ep, *params):
 
         start_time = time.time()
         it = i
+        epoch = ep
         for p in params:
             it = min(it, p['it'])
             p.pop('it')
+            epoch = min(epoch, p['epoch'])
 
         if (it < i):  # a failure
             print("----------------------- a failure is detected! roll back to: ", it)
+            self.train_loader = self.td.get_data_loader(self.batch_size, self.idx, self.num_workers, it+1, epoch)
+            self.data_iterator = iter(self.train_loader)
+            if not self.dali:
+                for _ in range(it): # just skip these iterations
+                    next(self.data_iterator)
             return None, None, it
 
         if (it < 0):
@@ -209,9 +213,6 @@ class Worker(object):
 
         self.grad = self.get_gradients()
         return self.grad, self.loss.cpu().data.numpy(), it
-
-
-
 
     def split_gradients(self, grad, assignments):
         if grad is None:
@@ -327,17 +328,16 @@ class PS(object):
         if not os.path.isdir(self.dirpath):
             os.mkdir(self.dirpath)
         else:
-                # delete contents for now
-                for filename in os.listdir(self.dirpath):
-                        file_path = os.path.join(self.dirpath, filename)
-                        os.remove(file_path)
-
+                # in order to check reloading, don't delete files in the normal setup.
+                # Need to explicitely handle folder cleaning after each experiment
+                self.restore()
+                
         print("start from: ", self.start_epoch, self.it)
 
     def reset(self):
         self.it = -1
 
-    def get_params(self, it):
+    def get_params(self, it, epoch):
         p = self.params
         wdict = {}
         for k in p.keys():
@@ -347,6 +347,7 @@ class PS(object):
             it = self.it
             print("-------------- ready after reloading!, it is: ", it)
         wdict['it'] = it
+        wdict['epoch'] = epoch
         return wdict
 
     def get_model_weights(self, it):
@@ -374,6 +375,15 @@ class PS(object):
         return True
 
     def apply_updates(self, epoch, itr, *list_of_gradients):
+
+        if (itr < self.it):
+            self.restore()
+            return True
+
+        if (itr == self.it):
+            return True
+        if (self.reloaded and not self.ready):
+            return True
 
         start_time = time.time()
         while self.in_progress_snapshot.value == 1:
@@ -509,13 +519,24 @@ class PS(object):
         savetime = time.time()-start
         print("store checkpoint took: ", savetime, " sec")
 
+    def restore(self):
+        files = filter( os.path.isfile, glob.glob(self.dirpath + '*'))
+        files = sorted(files, key=os.path.getmtime) # TODO: checkthis, sort ascending according to time
+        if len(files) == 0:
+            return
+
+        try:
+            self.load_checkpoint(files[:-1])
+        except RuntimeError:    # latest file corrupted, try the second
+            self.load_checkpoint(files[:-2])
+        
+
     def load_checkpoint(self, checkpoint_path):
-        #assert os.path.isdir(checkpoint_path), 'Error: no checkpoint directory found!'
         checkpoint = torch.load(checkpoint_path)
-        self.params = checkpoint['net']
+        self.params = checkpoint['model']
         self.set_params(self.params)
-        self.optimizer.load_state_dict(checkpoint['opt'])
-        self.epoch = checkpoint['epoch']
+        self.optimizer.load_state_dict(checkpoint['optimizer'])
+        self.start_epoch = checkpoint['epoch']
         self.it = checkpoint['iter']
 
     def join_proc(self):
@@ -682,13 +703,13 @@ class PSStrategy(object):
         # stitch parameters
 
         startit = time.time()
-        param_ids = [ps.get_params.remote(it) for ps in self.servers]
+        param_ids = [ps.get_params.remote(it, epoch) for ps in self.servers]
         # worker compute the grads
         ps_grad_mappings = [list() for i in range(self.num_ps)]
         loss_vals = []
         for worker in self.workers[:nw]:
             grad_id, loss, itr = worker.compute_gradients.remote(
-                it, *param_ids)  # stitched_param_id, it)
+                it, epoch, *param_ids)  # stitched_param_id, it)
             loss_vals.append(loss)
             split_gradient_ids = worker.split_gradients.remote(
                 grad_id, self.assignments)
