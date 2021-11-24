@@ -142,7 +142,13 @@ class Worker(object):
 
         self.loader_idx = 0 # this is used for indexing the data loader
 
-    def ready(self):
+        # for benchmarking
+        self.resume = 0
+        self.rewind=0 # stands for the time to redo the work
+        self.it_dict = {} # dict of the form <iteration number>-<timestamp>
+
+        self.last_time = 0
+
         return
 
     def num_params(self):
@@ -182,6 +188,8 @@ class Worker(object):
                 for _ in range(it): # just skip these iterations
                     next(self.data_iterator)
             self.loader_idx = it+1
+            self.resume = time.time() - self.last_time
+            print("time to resume execution is: ", self.resume)
             return None, None, it
 
         if (self.loader_idx == 0 and it > 1):
@@ -190,6 +198,7 @@ class Worker(object):
             for _ in range(it): # just skip these iterations
                next(self.data_iterator)
             self.loader_idx = it
+              
 
 
         weights = self.stitch_parameters(*params)
@@ -230,6 +239,13 @@ class Worker(object):
 
         self.grad = self.get_gradients()
         self.loader_idx = it
+        
+        if (it in self.it_dict):
+            self.rewind = time.time() - self.it_dict[it]
+            print("------------- rewind is: ", self.rewind)
+
+        self.it_dict[it] = time.time()
+        self.last_time = time.time()
         return self.grad, self.loss.cpu().data.numpy(), it
 
     def split_gradients(self, grad, assignments):
@@ -289,7 +305,6 @@ class Worker(object):
 
 
     def model_eval(self, ld):
-
         test_loader = ld.get_val_loader(self.batch_size, 0, 1)
         acc = evaluate(self.model, test_loader, self.dali)
         return acc
@@ -297,6 +312,12 @@ class Worker(object):
 
     def reset(self):
         self.model.train() # not really sure if this is needed
+        self.resume = 0
+        self.reset = 0
+        self.it_dict.clear()
+
+    def get_metrics(self):
+        return [self.rewind, self.resume]
 
 @ray.remote(num_cpus=1, max_restarts=-1, max_task_retries=-1)
 class PS(object):
@@ -342,6 +363,12 @@ class PS(object):
         self.filepath = self.mp_manager.Value(ctypes.c_wchar_p, "") #self.mp_manager.dict()
         self.additional_snapshot = self.mp_manager.dict()
 
+        # these are for benchmarking
+        self.store = 0
+        self.load = 0
+
+        time.sleep(2)
+
         self.dirpath = '/datadrive/home/ubuntu/CheckFreq/distributed/checkpoint/'
         if not os.path.isdir(self.dirpath):
             os.mkdir(self.dirpath)
@@ -355,6 +382,8 @@ class PS(object):
 
     def reset(self):
         self.it = -1
+        self.store = 0
+        self.load = 0
 
     def get_params(self, it, epoch):
         p = self.params
@@ -408,6 +437,7 @@ class PS(object):
         while self.in_progress_snapshot.value == 1:
             continue
         print("stall for snapshot took: ", time.time()-start_time)
+        self.store += time.time() - start_time
 
         assert(len(list_of_gradients) >= 1)
         summed_gradient_dict = dict()
@@ -460,12 +490,13 @@ class PS(object):
         # https://pytorch.org/tutorials/recipes/recipes/saving_and_loading_a_general_checkpoint.html
 
         print('Saving. Epoch:', epoch, ' , Iter: ', it)
+        start = time.time()
         self.additional_snapshot['epoch'] = epoch
         self.additional_snapshot['iter'] = it
-
-        start = time.time()
-        self.filepath.value = self.dirpath + 'chk_' + str(self.idx) + '_' + str(it) + '.chk'
         
+        self.filepath.value = self.dirpath + 'chk_' + str(self.idx) + '_' + str(it) + '.chk'
+
+
         skeys = list(self.optimizer.state_dict()['state'].keys())
         k = skeys[-1]
         #print("---- from PS, MODEL: ", 'linear.weight', self.params['linear.weight'])
@@ -536,9 +567,12 @@ class PS(object):
                     continue
 
         savetime = time.time()-start
+        self.store += savetime
         print("store checkpoint took: ", savetime, " sec")
 
     def restore(self):
+
+        start = time.time()
         files = filter( os.path.isfile, glob.glob(self.dirpath + '*'))
         files = sorted(files, key=os.path.getmtime) # TODO: checkthis, sort ascending according to time
         print("--------------------- files: ", files)
@@ -549,7 +583,7 @@ class PS(object):
             self.load_checkpoint(files[-1])
         except RuntimeError:    # latest file corrupted, try the second
             self.load_checkpoint(files[-2])
-        
+        self.load += time.time()-start        
 
     def load_checkpoint(self, checkpoint_path):
         print(checkpoint_path)
@@ -571,6 +605,10 @@ class PS(object):
 
     def get_stats(self):
         return self.start_epoch, self.it 
+
+
+    def get_metrics(self):
+        return [self.store, self.load]
 
 class PSStrategy(object):
     def __init__(self,
@@ -598,8 +636,8 @@ class PSStrategy(object):
         self.prev_iter_mean = 0
         self.max_overhead = 5
         self.dali = dali
-
         nodes_info = ray.nodes()
+        
         cpu_nodes = ['node:' + n['NodeManagerAddress']
                      for n in nodes_info if not 'GPU' in n["Resources"].keys()]
         gpu_nodes = ['node:' + n['NodeManagerAddress']
@@ -668,6 +706,7 @@ class PSStrategy(object):
         return model_weights
 
     def reset(self):
+
         ray.get([ps.reset.remote() for ps in self.servers])
         ray.get([w.reset.remote() for w in self.workers])
 
@@ -729,9 +768,48 @@ class PSStrategy(object):
             start_it = 0
         return start_epoch, start_it+1
  
+    def get_metrics(self, total_time):   
+       
+       # time for store and load
+       server_metrics = ray.get([s.get_metrics.remote() for s in self.servers])
+       store_times = [x[0] for x in server_metrics]
+       load_times = [x[1] for x in server_metrics]
+
+       tstore = max(store_times)
+       tload = max(load_times)
+
+       worker_metrics = ray.get([w.get_metrics.remote() for w in self.workers])
+       rewind_times = [x[0] for x in worker_metrics]
+       resume_times = [x[1] for x in worker_metrics]
+
+       res = max(resume_times)
+       rewind = max(rewind_times)
+
+       # time to reschedule
+       tresched = res - tload
+
+       # redo time
+       tredo = rewind - res
+
+       # train time
+       ttrain = total_time - (tstore + tload + tresched + tredo)
+       print("---------------- Start Print Metrics ------------------")
+       
+       print("Ttotal: ", total_time)
+       print("Ttrain: ", ttrain)
+       print("Tstore: ", tstore)
+       print("Tresched: ", tresched)
+       print("Tload: ", tload)
+       print("Tredo: ", tredo)
+ 
+       print("---------------- End Print Metrics ------------------")
+       return [total_time, ttrain, tstore, tresched, tload, tredo]
+       
+
 
     def step(self, epoch, it, nw):
         # stitch parameters
+
 
         startit = time.time()
         param_ids = [ps.get_params.remote(it, epoch) for ps in self.servers]
@@ -785,6 +863,8 @@ class PSStrategy(object):
                     self.iter_dur.append(time.time()-startit)
                 else:
                     self.adapt_freq()
+
+  
         print("Iteration took: ", time.time()-startit)
         return ray.get(itr)+1, check_time
 
@@ -903,7 +983,7 @@ def main():
 
     for i in range(start_epoch, epochs):
         strategy.reset()
-        while j < e_iters:
+        while j < 100: #e_iters:
             print("Iteration: ", j)
             j, chtime = strategy.step(i, j, num_workers)
             check_time += chtime
@@ -938,7 +1018,9 @@ def main():
             str(killed) + " , check time: " + str(check_time) + "\n"
         start = time.time()
 
+ 
     strategy.clean()
+    metrics = strategy.get_metrics(training_time)
     f = open('/datadrive/home/ubuntu/CheckFreq/distributed/output.txt', 'a')
     wr = "Iters: " + str(e_iters) + ", Freq: " + str(check_freq_iters) + ", Num workers: " + str(num_workers) + ", Num servers: " + str(num_servers) + \
         " , accuracy: " + str(accuracy) + " , time: " + str(training_time) + \
