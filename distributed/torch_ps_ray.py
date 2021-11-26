@@ -12,6 +12,7 @@ import torch.nn as nn
 import torchvision
 import torch.nn.functional as F
 import torchvision.models as torchmodels
+import torch.backends.cudnn as cudnn
 from filelock import FileLock
 from torchvision import transforms
 from torchvision.datasets import CIFAR10
@@ -95,8 +96,12 @@ def evaluate(model, test_loader, dali):
     return 100. * correct / total
 
 
-def seed_everything(seed=42):
-    # torch.use_deterministic_algorithms(True)
+def seed_everything(seed=42, det=False):
+    if det:
+       print("----------- enable deterministic training")
+       torch.use_deterministic_algorithms(True)
+    #cudnn.benchmark = False
+    #cudnn.deterministic = True
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -106,10 +111,10 @@ def seed_everything(seed=42):
 
 @ray.remote(num_gpus=1, num_cpus=1, max_restarts=5, max_task_retries=-1)
 class Worker(object):
-    def __init__(self, idx, batch_size, train_dir, num_ps, num_worker, rocksdb_lat, model_name, dali=False):
+    def __init__(self, idx, batch_size, train_dir, num_ps, num_worker, rocksdb_lat, model_name, dali=False, det=False):
         os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
         print('CUBLAS: ', os.environ.get('CUBLAS_WORKSPACE_CONFIG'))
-        seed_everything()
+        seed_everything(det=det)
 
         self.model_name = model_name
         self.model = models.__dict__[self.model_name](num_classes=10) 
@@ -201,7 +206,6 @@ class Worker(object):
 
 
         weights = self.stitch_parameters(*params)
-
         # compute gradients
 
         w_dict_torch = {}
@@ -225,9 +229,10 @@ class Worker(object):
         else:
             [x, y] = batch
             x, y = x.to(self.device), y.to(self.device)
+            #print(x, y)
 
         self.set_weights(w_dict_torch)
-        # self.model.eval() - TODO: fix this with resnet and vgg
+        #self.model.eval()   # - TODO: fix this with resnet and vgg
 
         self.model.zero_grad()
         #input_var = Variable(x)
@@ -320,10 +325,10 @@ class Worker(object):
 
 @ray.remote(num_cpus=1, max_restarts=-1, max_task_retries=-1)
 class PS(object):
-    def __init__(self, idx, freq, num_ps, checkp_local, rocksdb_lat, model_name, synchronous):
+    def __init__(self, idx, freq, num_ps, checkp_local, rocksdb_lat, model_name, synchronous, det=False):
         os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
         print('CUBLAS: ', os.environ.get('CUBLAS_WORKSPACE_CONFIG'))
-        seed_everything()
+        seed_everything(det=det)
 
         ### for training
         self.start_epoch = 0
@@ -620,7 +625,7 @@ class PSStrategy(object):
                  num_ps,
                  batch_size, freq,
                  checkp_local, rocksdb_lat, model_name, collocated, 
-                 sync, profile, prof_steps, dali, train_dir):
+                 sync, profile, prof_steps, dali, train_dir, det):
 
         self.num_ps = num_ps
         self.num_worker = num_worker
@@ -666,13 +671,13 @@ class PSStrategy(object):
         for j in range(self.num_worker):
             idx = j
             self.workers.append(dw[j].remote(
-                idx, batch_size, train_dir, self.num_ps, self.num_worker, self.rocksdb_lat, self.model_name, dali=self.dali))
+                idx, batch_size, train_dir, self.num_ps, self.num_worker, self.rocksdb_lat, self.model_name, dali=self.dali, det=det))
 
         # spawn ps
         self.servers = []
         for j in range(self.num_ps):
             self.servers.append(ps[j].remote(
-                j, freq, self.num_ps, self.checkp_local, self.rocksdb_lat, self.model_name, self.synchronous))
+                j, freq, self.num_ps, self.checkp_local, self.rocksdb_lat, self.model_name, self.synchronous, det=det))
 
         self.initialize()
 
@@ -924,6 +929,9 @@ def main():
                         help='Whether to use the DALI (CoorDL) library for data preprocessing') 
     parser.add_argument('--data_path', type=str, default="",
                         help='Path to dataset. It must have subdirectories named "train" and "val";')                   
+    parser.add_argument('--deterministic', type=bool, default=False,
+                        help='Set if want to enable deterministic training. Note that this will set the <use_deterministic_algorithms> option, and can slow down training')
+
     args = parser.parse_args()
 
     print(args)
@@ -942,7 +950,8 @@ def main():
     profile  = args.profile
     use_dali = args.use_dali
     data_path = args.data_path
-
+    det = args.deterministic
+  
     traindir = os.path.join(data_path, 'train')
     valdir = os.path.join(data_path, 'val')
 
@@ -956,7 +965,7 @@ def main():
     print(driver_node_id)
 
     os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
-    seed_everything()
+    seed_everything(det=det)
     #model = config_model.get_model_by_name(model_name)
     model = models.__dict__[model_name](num_classes=10)
 
@@ -977,7 +986,7 @@ def main():
         num_ps=num_servers,
         batch_size=train_batch_size, freq=check_freq_iters,
         checkp_local=local_check, rocksdb_lat=rocksdb_lat, model_name=model_name, collocated=collocated, 
-        sync=sync, profile=profile, prof_steps=prof_steps, dali=use_dali, train_dir=traindir)
+        sync=sync, profile=profile, prof_steps=prof_steps, dali=use_dali, train_dir=traindir, det=det)
 
     training_time = 0
     e_iters = math.floor(iter_per_epoch/num_workers)
