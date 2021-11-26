@@ -483,7 +483,7 @@ class PS(object):
            return
 
 
-    def store_checkpoint(self, epoch, it, profile_snap=False, profile_all=False):
+    def store_checkpoint(self, epoch, it, profile_snap=False, profile_all=False, sync=False):
 
         # https://pytorch.org/tutorials/recipes/recipes/saving_and_loading_a_general_checkpoint.html
 
@@ -560,7 +560,7 @@ class PS(object):
                 self.spawned = True
 
             # wait for the checkpoint/snapshot to complete if needed
-            if profile_snap or profile_all:
+            if profile_snap or profile_all or sync:
                 while self.change.value==1:		
                     continue
 
@@ -640,8 +640,10 @@ class PSStrategy(object):
         self.prev_iter_mean = 0
         self.max_overhead = 5
         self.dali = dali
-        nodes_info = ray.nodes()
-        
+        self.skip_iter = False
+
+        nodes_info = ray.nodes()        
+
         cpu_nodes = ['node:' + n['NodeManagerAddress']
                      for n in nodes_info if not 'GPU' in n["Resources"].keys()]
         gpu_nodes = ['node:' + n['NodeManagerAddress']
@@ -811,14 +813,19 @@ class PSStrategy(object):
        return [total_time, ttrain, tstore, tresched, tload, tredo]
        
 
-    def init_checkpoint(self):
-        ray.get([ps.store_checkpoint.remote(0, 0) for ps in self.servers])
-
+    def sync_checkpoint(self, epoch, it):
+        ray.get([ps.store_checkpoint.remote(epoch, it, sync=True) for ps in self.servers])
+        self.steps_since_checkp=0
+ 
     def step(self, epoch, it, nw):
         # stitch parameters
 
 
         startit = time.time()
+
+        if self.skip_iter:
+            self.skip_iter = False
+
         param_ids = [ps.get_params.remote(it, epoch) for ps in self.servers]
         # worker compute the grads
         ps_grad_mappings = [list() for i in range(self.num_ps)]
@@ -844,7 +851,7 @@ class PSStrategy(object):
         endit = time.time()
         
         if (epoch==0 and it==0):
-            self.init_checkpoint()
+            self.sync_checkpoint(0, 0)
 
         check_time=0
         if (self.profile and (not self.prof_done) and it >= 5 and it < self.prof_steps): # collect statistics for the iteration time
@@ -856,6 +863,7 @@ class PSStrategy(object):
             print("---------- Complete profiling")
             self.freq = self.do_prof(epoch, it)
             self.prof_done = True
+            self.skip_iter = True
 
         else:
             start = time.time()
@@ -870,7 +878,7 @@ class PSStrategy(object):
         if self.profile and self.prof_done:
             if not self.monitor:
                 self.monitor = True
-            if self.monitor:
+            if self.monitor and not self.skip_iter:
                 self.monitor_iter += 1
                 if self.monitor_iter <= self.freq:
                     self.iter_dur.append(time.time()-startit)
@@ -997,7 +1005,7 @@ def main():
     #strategy.init_checkpoint()
     for i in range(start_epoch, epochs):
         strategy.reset()
-        while j < 5: #e_iters:
+        while j < e_iters:
             print("Iteration: ", j)
             j, chtime = strategy.step(i, j, num_workers)
             check_time += chtime
@@ -1016,11 +1024,17 @@ def main():
         if (rem > 0):
             strategy.step(i, j, rem)
 
+        end_iter = j
         j = 0
 
         current_weights = strategy.get_weights()
         training_time += (time.time()-start)
         tt = time.time()-start
+
+        # checkpoint at the end of the epoch
+        strategy.sync_checkpoint(i, end_iter)
+
+
         #model.set_weights(current_weights)
         start_time = time.time()
         accuracy = strategy.evaluate(ld)
