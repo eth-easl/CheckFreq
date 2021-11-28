@@ -154,6 +154,8 @@ class Worker(object):
 
         self.last_time = 0
 
+        self.params = {}
+        self.build_params()
         return
 
     def num_params(self):
@@ -166,6 +168,12 @@ class Worker(object):
             #print(k, v.shape, v.numel(), (v.numel()*4)/1000000)
             distribution.append(v.numel())
         return distribution
+
+    def build_params(self):
+        weights = self.get_weights()
+        for k, v in weights.items():
+            self.params[k] = np.ones(v.shape)
+        print("build params done!")        
 
     @ray.method(num_returns=3)
     def compute_gradients(self, i, ep, *params):
@@ -205,8 +213,9 @@ class Worker(object):
             self.loader_idx = it
               
 
-
+        s = time.time()
         weights = self.stitch_parameters(*params)
+        print("stitch params took: ", time.time()-s)
         # compute gradients
 
         w_dict_torch = {}
@@ -255,6 +264,7 @@ class Worker(object):
 
     def split_gradients(self, grad, assignments):
         #print(grad)
+        start = time.time()
         if grad is None:
             num_shards = np.unique(np.array(assignments)).size
             return [None] * num_shards
@@ -271,7 +281,8 @@ class Worker(object):
                 values = np.array_split(v,self.num_ps)
                 for j in range(self.num_ps):
                     shards[assignments[i][j]][k] = values[j]
-
+        print("split_gradients took: ", time.time()-start)
+  
         return shards
 
     def split_parameters(self, assignments):
@@ -280,41 +291,56 @@ class Worker(object):
         params = self.get_weights()
         num_shards = self.num_ps #np.unique(np.array(assignments)).size
         shards = [dict() for i in range(num_shards)]
-        print("------------ shards: ", shards)      
+        loads = [0] * self.num_ps      
         for i, (k, v) in enumerate(params.items()):
             cpu_data = v.data.cpu()
-            print("--- to check: ", i, k, len(assignments[i]))
             if (len(assignments[i]) == 1):
                 shards[assignments[i][0]][k] = cpu_data
+                loads[assignments[i][0]] += cpu_data.numel()
             else:
                 # split on the first dim for now, TODO: fix this
                 print(i, k)
                 dim = cpu_data.shape[0]
                 sharddim = dim//self.num_ps
+                
                 split_dims = [sharddim] * self.num_ps
-                split_dims[-1] = dim - (sharddim * self.num_ps - 1)
+                split_dims[-1] = dim - (sharddim * (self.num_ps - 1))
+                #print(split_dims)
                 values = torch.split(cpu_data,split_dims)
                 for j in range(self.num_ps):
                     shards[assignments[i][j]][k] = values[j]
-        #print("---- shards: ", shards) 
+                    #print(values[j].shape)
+                    loads[j] += values[j].numel()
+        print("---- loads: ", loads) 
         return shards
 
     def index_shard(self, shards, index):
         return shards[index]
 
     def stitch_parameters(self, *split_params):
-        start = time.time()
-        params = dict()
+        last_idx = {}
+        params = []
         for p in split_params:
             for k, v in p.items():
                 if k not in params:
-                     params[k] = v
+                     
+                     #print("-----------------", k, self.params[k].shape, v.shape)
+                     if (v.shape[0] != self.params[k].shape[0]):
+                        #print("-----------------", k, self.params[k].shape)
+                        self.params[k][0:v.shape[0]] = v
+                     else:
+                        self.params[k] = v
+                     last_idx[k] = v.shape[0]
+                     params.append(k)
                 else:
+                     #print(k, last_idx[k], self.params[k].shape)
                      # parameter partition - restore
                      # they are numpy arrays
                      # TODO: make sure the order is correct!!!!
-                     params[k] = np.concatenate([params[k], v], axis=0)
-        return params
+                     self.params[k][last_idx[k]:(last_idx[k]+v.shape[0])] = v #np.concatenate([params[k], v], axis=0)
+                     last_idx[k] += v.shape[0]
+               #print(params[k].shape)
+        return self.params
 
     def get_state(self):
         return {k: v.cpu() for k, v in self.model.state_dict().items()}
@@ -420,6 +446,7 @@ class PS(object):
         self.load = 0
 
     def get_params(self, it, epoch):
+        start = time.time()
         p = self.params
         wdict = {}
         for k in p.keys():
@@ -430,6 +457,8 @@ class PS(object):
             print("-------------- ready after reloading!, it is: ", it)
         wdict['it'] = it
         wdict['epoch'] = epoch
+        end = time.time()
+        print('get_params took: ', end-start)
         return wdict
 
     def get_model_weights(self, it):
@@ -1056,7 +1085,7 @@ def main():
     #strategy.init_checkpoint()
     for i in range(start_epoch, epochs):
         strategy.reset()
-        while j < e_iters:
+        while  j < e_iters:
             print("Iteration: ", j)
             j, chtime = strategy.step(i, j, num_workers)
             check_time += chtime
