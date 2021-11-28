@@ -172,8 +172,8 @@ class Worker(object):
     def build_params(self):
         weights = self.get_weights()
         for k, v in weights.items():
-            self.params[k] = np.ones(v.shape)
-        print("build params done!")        
+            self.params[k] = np.ones(v.shape, dtype=np.float32)
+        #print("build params done!")        
 
     @ray.method(num_returns=3)
     def compute_gradients(self, i, ep, *params):
@@ -213,9 +213,7 @@ class Worker(object):
             self.loader_idx = it
               
 
-        s = time.time()
         weights = self.stitch_parameters(*params)
-        print("stitch params took: ", time.time()-s)
         # compute gradients
 
         w_dict_torch = {}
@@ -241,9 +239,9 @@ class Worker(object):
             x, y = x.to(self.device), y.to(self.device)
             #print(x, y)
 
+
         self.set_weights(w_dict_torch)
         #self.model.eval()   # - TODO: fix this with resnet and vgg
-
         self.model.zero_grad()
         #input_var = Variable(x)
         output = self.model(x)
@@ -458,7 +456,6 @@ class PS(object):
         wdict['it'] = it
         wdict['epoch'] = epoch
         end = time.time()
-        print('get_params took: ', end-start)
         return wdict
 
     def get_model_weights(self, it):
