@@ -23,7 +23,7 @@ parser.add_argument('--val-dir', default=os.path.expanduser('~/imagenet/validati
                     help='path to validation data')
 parser.add_argument('--log-dir', default='./logs',
                     help='tensorboard log directory')
-parser.add_argument('--checkpoint-format', default='./checkpoint-{epoch}.pth.tar',
+parser.add_argument('--checkpoint-format', default='./checkpoint-{epoch}-{it}.chk',
                     help='checkpoint file format')
 parser.add_argument('--fp16-pushpull', action='store_true', default=False,
                     help='use fp16 compression during pushpull')
@@ -54,6 +54,10 @@ parser.add_argument('--no-cuda', action='store_true', default=False,
 parser.add_argument('--seed', type=int, default=42,
                     help='random seed')
 
+parser.add_argument('--cfreq', type=int, default=-1,
+                    help='checkpoint frequency')
+
+
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
 
@@ -72,12 +76,14 @@ if args.cuda:
 cudnn.benchmark = True
 
 # If set > 0, will resume training from a given checkpoint.
+
 resume_from_epoch = 0
+'''
 for try_epoch in range(args.epochs, 0, -1):
     if os.path.exists(args.checkpoint_format.format(epoch=try_epoch)):
         resume_from_epoch = try_epoch
         break
-
+'''
 # BytePS: broadcast resume_from_epoch from rank 0 (which will have
 # checkpoints) to other ranks.
 #resume_from_epoch = bps.broadcast(torch.tensor(resume_from_epoch), root_rank=0,
@@ -160,7 +166,7 @@ if resume_from_epoch > 0 and bps.rank() == 0:
 bps.broadcast_parameters(model.state_dict(), root_rank=0)
 bps.broadcast_optimizer_state(optimizer, root_rank=0)
 
-print(model.state_dict())
+#print(model.state_dict())
 print(bps.rank())
 #print(train_loader[0])
 train_it = enumerate(train_loader)
@@ -177,6 +183,8 @@ def train(epoch):
               desc='Train Epoch     #{}'.format(epoch + 1),
               disable=not verbose) as t:
         it = 0
+        prev_epoch = -1
+        prev_it = -1
         for batch_idx, (data, target) in enumerate(train_loader):
             #adjust_learning_rate(epoch, batch_idx)
             if args.cuda:
@@ -188,7 +196,7 @@ def train(epoch):
                 data_batch = data[i:i + args.batch_size]
                 target_batch = target[i:i + args.batch_size]
                 output = model(data_batch)
-                #print(data_batch, output, target)
+                #print(output, target)
                 train_accuracy.update(accuracy(output, target_batch))
                 loss = F.cross_entropy(output, target_batch)
                 train_loss.update(loss.item())
@@ -199,6 +207,11 @@ def train(epoch):
             optimizer.step()
             t.set_postfix({'loss': train_loss.avg.item(),
                            'accuracy': 100. * train_accuracy.avg.item()})
+            if (bps.rank()==0 and args.cfreq > 0 and it % args.cfreq == 0):
+                save_checkpoint(epoch, it, prev_epoch, prev_it)
+                prev_epoch = epoch
+                prev_it = it
+
             print("it: ", it, " time: ", time.time()-start, len(data))
             t.update(1)
             start = time.time()
@@ -266,14 +279,18 @@ def accuracy(output, target):
     return pred.eq(target.view_as(pred)).float().mean()
 
 
-def save_checkpoint(epoch):
+def save_checkpoint(epoch, it, prev_epoch, prev_it):
     if bps.rank() == 0:
-        filepath = args.checkpoint_format.format(epoch=epoch + 1)
+        filepath = args.checkpoint_format.format(epoch=epoch, it=it)
         state = {
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
         }
         torch.save(state, filepath)
+        del_filepath = args.checkpoint_format.format(epoch=prev_epoch, it=prev_it)
+        if os.path.exists(del_filepath):
+            os.remove(del_filepath)
+
 
 
 # BytePS: average metrics from distributed training.
@@ -300,6 +317,6 @@ for epoch in range(resume_from_epoch, args.epochs):
     print("Epoch ", epoch, " took: ",time.time()-start)
     timings.append(time.time()-start)
     validate(epoch)
-    save_checkpoint(epoch)
+    #save_checkpoint(epoch)
 
 print(timings)
