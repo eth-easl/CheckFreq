@@ -694,7 +694,7 @@ def train(train_loader, model, criterion, optimizer, epoch, df, cf_manager):
 
         if args.local_rank == 0 and i % args.print_freq == 0 and i > 1:
             print('Epoch: [{0}][{1}/{2}]\t'
-                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f}) ({batch_time.sum:.3f})\t'
                   'Speed {3:.3f} ({4:.3f})\t'
                   'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
                   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'

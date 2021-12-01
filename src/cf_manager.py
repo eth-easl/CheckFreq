@@ -591,7 +591,7 @@ class CFManager:
 						optimizer.step()
 						#torch.cuda.synchronize()
 						dur = time.time() - s
-						self.logger.info("Stall to weight update = {}s".format(dur))
+						# self.logger.info("Stall to weight update = {}s".format(dur))
 				else:	
 						self.logger.info("NO Optimizer found")
 
