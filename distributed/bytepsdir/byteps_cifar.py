@@ -13,6 +13,22 @@ import os
 import math
 from tqdm import tqdm
 import time
+import ctypes 
+import sys
+
+sys.path.append('../')
+import dist_chk_bps
+
+from torch.multiprocessing import Pool, Process, set_start_method, Manager, Value, Lock, freeze_support, spawn
+
+'''
+try:
+    #ctx = multiprocessing.get_context("spawn")
+    set_start_method('spawn')
+except RuntimeError:
+    print("---- error!")
+    pass
+'''
 
 # Training settings
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Example',
@@ -57,122 +73,175 @@ parser.add_argument('--seed', type=int, default=42,
 parser.add_argument('--cfreq', type=int, default=-1,
                     help='checkpoint frequency')
 
+parser.add_argument('--sync', type=bool, default=False,
+                    help='whether to do synchronous checkpoint or not')
+
+parser.add_argument('--prof', type=bool, default=False,
+                    help='whether to do synchronous checkpoint or not')
 
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
 
 pushpull_batch_size = args.batch_size * args.batches_per_pushpull
 
-bps.init()
+def main():
 
-print("--- bps size: ", bps.size())
-torch.manual_seed(args.seed)
+    bps.init()
 
-if args.cuda:
-    # BytePS: pin GPU to local rank.
-    torch.cuda.set_device(bps.local_rank())
-    torch.cuda.manual_seed(args.seed)
+    print("--- bps size: ", bps.size())
+    torch.manual_seed(args.seed)
 
-cudnn.benchmark = True
+    if args.cuda:
+        # BytePS: pin GPU to local rank.
+        torch.cuda.set_device(bps.local_rank())
+        torch.cuda.manual_seed(args.seed)
 
-# If set > 0, will resume training from a given checkpoint.
+    cudnn.benchmark = True
 
-resume_from_epoch = 0
-'''
-for try_epoch in range(args.epochs, 0, -1):
-    if os.path.exists(args.checkpoint_format.format(epoch=try_epoch)):
-        resume_from_epoch = try_epoch
-        break
-'''
-# BytePS: broadcast resume_from_epoch from rank 0 (which will have
-# checkpoints) to other ranks.
-#resume_from_epoch = bps.broadcast(torch.tensor(resume_from_epoch), root_rank=0,
-#                                  name='resume_from_epoch').item()
+    # If set > 0, will resume training from a given checkpoint.
 
-# BytePS: print logs on the first worker.
-verbose = 1 if bps.rank() == 0 else 0
+    resume_from_epoch = 0
+    '''
+    for try_epoch in range(args.epochs, 0, -1):
+        if os.path.exists(args.checkpoint_format.format(epoch=try_epoch)):
+            resume_from_epoch = try_epoch
+            break
+    '''
+    # BytePS: broadcast resume_from_epoch from rank 0 (which will have
+    # checkpoints) to other ranks.
+    #resume_from_epoch = bps.broadcast(torch.tensor(resume_from_epoch), root_rank=0,
+    #                                  name='resume_from_epoch').item()
 
-# BytePS: write TensorBoard logs on first worker.
-log_writer = tensorboardX.SummaryWriter(args.log_dir) if bps.rank() == 0 else None
+    # BytePS: print logs on the first worker.
+    verbose = 1 if bps.rank() == 0 else 0
 
-print(bps.size(), bps.rank(), pushpull_batch_size)
-kwargs = {'num_workers': 4, 'pin_memory': True} if args.cuda else {}
-train_dataset = \
-    datasets.ImageFolder(args.train_dir,
-                         transform=transforms.Compose([
-                             transforms.RandomResizedCrop(224),
-                             transforms.RandomHorizontalFlip(),
-                             transforms.ToTensor(),
-                             transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
-                                    std=[0.2023, 0.1994, 0.2010])
-                         ]))
-# BytePS: use DistributedSampler to partition data among workers. Manually specify
-# `num_replicas=bps.size()` and `rank=bps.rank()`.
-train_sampler = torch.utils.data.distributed.DistributedSampler(
-    train_dataset, num_replicas=bps.size(), rank=bps.rank())
-train_loader = torch.utils.data.DataLoader(
-    train_dataset, batch_size=pushpull_batch_size,  #shuffle=True, **kwargs)
-    sampler=train_sampler, **kwargs)
+    # BytePS: write TensorBoard logs on first worker.
+    log_writer = tensorboardX.SummaryWriter(args.log_dir) if bps.rank() == 0 else None
 
-val_dataset = \
-    datasets.ImageFolder(args.val_dir,
-                         transform=transforms.Compose([
-                             transforms.Resize(256),
-                             transforms.CenterCrop(224),
-                             transforms.ToTensor(),
-                             transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
-                                    std=[0.2023, 0.1994, 0.2010])
-                         ]))
-val_sampler = torch.utils.data.distributed.DistributedSampler(
-    val_dataset, num_replicas=bps.size(), rank=bps.rank())
-val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.val_batch_size, #shuffle=False, **kwargs)
-                                         sampler=val_sampler, **kwargs)
+    print(bps.size(), bps.rank(), pushpull_batch_size)
+    kwargs = {'num_workers': 4, 'pin_memory': True} if args.cuda else {}
+    train_dataset = \
+        datasets.ImageFolder(args.train_dir,
+                            transform=transforms.Compose([
+                                transforms.RandomResizedCrop(224),
+                                transforms.RandomHorizontalFlip(),
+                                transforms.ToTensor(),
+                                transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
+                                        std=[0.2023, 0.1994, 0.2010])
+                            ]))
+    # BytePS: use DistributedSampler to partition data among workers. Manually specify
+    # `num_replicas=bps.size()` and `rank=bps.rank()`.
+    train_sampler = torch.utils.data.distributed.DistributedSampler(
+        train_dataset, num_replicas=bps.size(), rank=bps.rank())
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=pushpull_batch_size,  #shuffle=True, **kwargs)
+        sampler=train_sampler, **kwargs)
 
-
-# get model
-model = models.__dict__[args.arch](num_classes=10)
-
-if args.cuda:
-    # Move model to GPU.
-    model.cuda()
-
-# BytePS: scale learning rate by the number of GPUs.
-# Gradient Accumulation: scale learning rate by batches_per_pushpull
-optimizer = optim.SGD(model.parameters(),
-                      lr=(args.base_lr *
-                          args.batches_per_pushpull * bps.size()),
-                      momentum=args.momentum, weight_decay=args.wd)
-
-# BytePS: (optional) compression algorithm.
-compression = bps.Compression.fp16 if args.fp16_pushpull else bps.Compression.none
-
-# BytePS: wrap optimizer with DistributedOptimizer.
-
-optimizer = bps.DistributedOptimizer(
-    optimizer, named_parameters=model.named_parameters(),
-    compression=compression,
-    backward_passes_per_step=args.batches_per_pushpull)
+    val_dataset = \
+        datasets.ImageFolder(args.val_dir,
+                            transform=transforms.Compose([
+                                transforms.Resize(256),
+                                transforms.CenterCrop(224),
+                                transforms.ToTensor(),
+                                transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
+                                        std=[0.2023, 0.1994, 0.2010])
+                            ]))
+    val_sampler = torch.utils.data.distributed.DistributedSampler(
+        val_dataset, num_replicas=bps.size(), rank=bps.rank())
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.val_batch_size, #shuffle=False, **kwargs)
+                                            sampler=val_sampler, **kwargs)
 
 
-# Restore from a previous checkpoint, if initial_epoch is specified.
-# BytePS: restore on the first worker which will broadcast weights to other workers.
-if resume_from_epoch > 0 and bps.rank() == 0:
-    filepath = args.checkpoint_format.format(epoch=resume_from_epoch)
-    checkpoint = torch.load(filepath)
-    model.load_state_dict(checkpoint['model'])
-    optimizer.load_state_dict(checkpoint['optimizer'])
+    # get model
+    model = models.__dict__[args.arch](num_classes=10)
 
-# BytePS: broadcast parameters & optimizer state.
-bps.broadcast_parameters(model.state_dict(), root_rank=0)
-bps.broadcast_optimizer_state(optimizer, root_rank=0)
+    if args.cuda:
+        # Move model to GPU.
+        model.cuda()
 
-#print(model.state_dict())
-print(bps.rank())
-#print(train_loader[0])
-train_it = enumerate(train_loader)
-#print(len(train_it))
+    # BytePS: scale learning rate by the number of GPUs.
+    # Gradient Accumulation: scale learning rate by batches_per_pushpull
+    optimizer = optim.SGD(model.parameters(),
+                        lr=(args.base_lr *
+                            args.batches_per_pushpull * bps.size()),
+                        momentum=args.momentum, weight_decay=args.wd)
 
-def train(epoch):
+    # BytePS: (optional) compression algorithm.
+    compression = bps.Compression.fp16 if args.fp16_pushpull else bps.Compression.none
+
+    # BytePS: wrap optimizer with DistributedOptimizer.
+
+    optimizer = bps.DistributedOptimizer(
+        optimizer, named_parameters=model.named_parameters(),
+        compression=compression,
+        backward_passes_per_step=args.batches_per_pushpull)
+
+
+    # Restore from a previous checkpoint, if initial_epoch is specified.
+    # BytePS: restore on the first worker which will broadcast weights to other workers.
+    if resume_from_epoch > 0 and bps.rank() == 0:
+        filepath = args.checkpoint_format.format(epoch=resume_from_epoch)
+        checkpoint = torch.load(filepath)
+        model.load_state_dict(checkpoint['model'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+
+    # BytePS: broadcast parameters & optimizer state.
+    bps.broadcast_parameters(model.state_dict(), root_rank=0)
+    bps.broadcast_optimizer_state(optimizer, root_rank=0)
+
+    #print(model.state_dict())
+    print(bps.rank())
+    #print(train_loader[0])
+    train_it = enumerate(train_loader)
+    #print(len(train_it))
+
+    ## for checkpointing, according to checkfreq ##
+    # the checkpoint class
+    
+    for name,ref in model.state_dict().items():
+        make_shm(ref)
+
+    for name,ref in optimizer.state_dict().items():
+        make_shm(ref)
+    
+    # are these needed?
+
+
+    chk = dist_chk_bps.CFCheckpoint(model=model.state_dict(), optimizer=optimizer.state_dict())
+    print(chk)
+    chk_process = None
+    spawned = False
+    overwrite = True
+
+    active_snapshot = Value('i', 0)
+    lock = Lock()
+    in_progress_snapshot = Value('i', 0)
+    profile_snap = Value('i', 0)
+
+    mp_manager = Manager()
+    iter = Value('i', 0)
+    epoch = Value('i', 0)
+    last_chk_it = Value('i', -1)
+
+    change = Value('i', 0)					
+    filepath = mp_manager.Value(ctypes.c_wchar_p, "") #self.mp_manager.dict()
+    additional_snapshot = mp_manager.dict()
+
+    timings=[]
+    for epoch in range(resume_from_epoch, args.epochs):
+        start = time.time()
+        train(epoch, model, optimizer, train_sampler, train_loader, verbose, in_progress_snapshot, log_writer, \
+                 filepath, additional_snapshot, chk, active_snapshot, lock, last_chk_it, change, profile_snap)
+        print("Epoch ", epoch, " took: ",time.time()-start)
+        timings.append(time.time()-start)
+        validate(epoch,  model, val_loader, verbose, log_writer)
+        #save_checkpoint(epoch)
+
+    print(timings)
+
+
+def train(epoch, model, optimizer, train_sampler, train_loader, verbose, in_progress_snapshot, log_writer, \
+            filepath, additional_snapshot, chk, active_snapshot, lock, last_chk_it, change, profile_snap):
     print("--------------- Train at epoch ", epoch)
     model.train()
     train_sampler.set_epoch(epoch)
@@ -190,6 +259,7 @@ def train(epoch):
             if args.cuda:
                 data, target = data.cuda(), target.cuda()
             #print(data, target)
+            # TODO: could this affect checkpoint?
             optimizer.zero_grad()
             # Split data into sub-batches of size batch_size
             for i in range(0, len(data), args.batch_size):
@@ -204,11 +274,20 @@ def train(epoch):
                 loss.div_(math.ceil(float(len(data)) / args.batch_size))
                 loss.backward()
             # Gradient is applied across all ranks
+            if (bps.rank()==0):
+
+                ## wait for fine-grained chec
+                start_time = time.time()
+                while in_progress_snapshot.value == 1:
+                    continue
+                print("stall for snapshot took: ", time.time()-start_time)
+
             optimizer.step()
             t.set_postfix({'loss': train_loss.avg.item(),
                            'accuracy': 100. * train_accuracy.avg.item()})
             if (bps.rank()==0 and args.cfreq > 0 and it % args.cfreq == 0):
-                save_checkpoint(epoch, it, prev_epoch, prev_it)
+                save_checkpoint(filepath, model, optimizer, additional_snapshot, chk, active_snapshot, in_progress_snapshot, lock, \
+                                         epoch, it, last_chk_it, change, profile_snap, sync=args.sync)
                 prev_epoch = epoch
                 prev_it = it
 
@@ -222,7 +301,7 @@ def train(epoch):
         log_writer.add_scalar('train/accuracy', train_accuracy.avg, epoch)
 
 
-def validate(epoch):
+def validate(epoch, model, val_loader, verbose, log_writer):
     model.eval()
     val_loss = Metric('val_loss')
     val_accuracy = Metric('val_accuracy')
@@ -257,7 +336,7 @@ def validate(epoch):
 # accuracy. Scale the learning rate `lr = base_lr` ---> `lr = base_lr * bps.size()` during
 # the first five epochs. See https://arxiv.org/abs/1706.02677 for details.
 # After the warmup reduce learning rate by 10 on the 30th, 60th and 80th epochs.
-def adjust_learning_rate(epoch, batch_idx):
+def adjust_learning_rate(epoch, batch_idx, train_loader, optimizer):
     if epoch < args.warmup_epochs:
         epoch += float(batch_idx + 1) / len(train_loader)
         lr_adj = 1. / bps.size() * (epoch * (bps.size() - 1) / args.warmup_epochs + 1)
@@ -273,28 +352,87 @@ def adjust_learning_rate(epoch, batch_idx):
         param_group['lr'] = args.base_lr * bps.size() * args.batches_per_pushpull * lr_adj
 
 
+def make_shm(obj):
+    if obj is None:
+        return
+    if torch.is_tensor(obj):
+        obj.share_memory_()
+    elif isinstance(obj, dict):
+        for name, ref in obj.items(): 
+            make_shm(ref)
+    elif isinstance(obj, list):
+        for x in obj:
+            make_shm(x)
+    else:
+        return
+
 def accuracy(output, target):
     # get the index of the max log-probability
     pred = output.max(1, keepdim=True)[1]
     return pred.eq(target.view_as(pred)).float().mean()
 
+def hello():
+    print("hello")
 
-def save_checkpoint(epoch, it, prev_epoch, prev_it):
-    if bps.rank() == 0:
-        filepath = args.checkpoint_format.format(epoch=epoch, it=it)
-        state = {
-            'model': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-        }
-        torch.save(state, filepath)
-        f = open(filepath, 'a+')
-        os.fsync(f.fileno())
-        f.close()
-        del_filepath = args.checkpoint_format.format(epoch=prev_epoch, it=prev_it)
-        if os.path.exists(del_filepath):
-            os.remove(del_filepath)
+def save_checkpoint(filepath, model, optimizer, additional_snapshot, chk, active_snapshot, in_progress_snapshot, lock, \
+                        epoch, it, last_chk_it, change, profile_snap,  sync=False, prof_snap=False, prof_all=False):
 
+    filepath.value = args.checkpoint_format.format(epoch=epoch, it=it)
+    additional_snapshot['epoch'] = epoch
+    additional_snapshot['iter'] = it
+    print(chk.chk_process)
 
+    print("----------- FROM WORKER, MODEL: fc.bias: ", model.state_dict()['fc.bias'])
+    skeys = list(optimizer.state_dict()['state'].keys())
+    k = skeys[-1]
+    print("---- from WORKER, OPT: ", k, optimizer.state_dict()['state'][k])
+
+    if sync:
+        chk._serialize_and_persist(filepath,  active_snapshot, in_progress_snapshot, lock, 1, \
+                additional_snapshot, background=False, snapshot_ready=False, iter_chk=last_chk_it, overwrite=True)
+    else:
+        if chk.chk_process is not None:
+            while change.value==1:		
+                # this means a checkpoint is on progress (wait for process doing the checkpoint to set variable to 0)
+                continue
+
+		# Once complete, initiate the next checkpoint synchronously
+        with lock:
+                in_progress_snapshot.value = 1
+
+        if prof_snap:
+                profile_snap.value = 1
+        else:
+                profile_snap.value = 0
+
+        fn = Process #globals()["Process"]	
+
+        print("self spanwned is: ", chk.spawned)
+        with lock:
+                change.value = 1
+
+    
+    
+        if not chk.spawned:
+            print("------------- START A NEW PROCESS!! ------------")
+            keywords = { \
+					'snapshot_ready': False, \
+                    'profile_snap': profile_snap, \
+					'background': True, \
+					'iter_chk':last_chk_it, \
+					'overwrite':True}
+            chk.chk_process = \
+					fn(target=chk._serialize_and_persist,	\
+						args=[filepath, active_snapshot, in_progress_snapshot, lock, change, additional_snapshot], kwargs=keywords)
+            freeze_support()
+            chk.chk_process.start()
+            chk.spawned = True
+
+        # wait for the checkpoint/snapshot to complete if needed
+        if profile_snap or prof_all or sync:
+            while change.value==1:		
+                continue
+        
 
 # BytePS: average metrics from distributed training.
 class Metric(object):
@@ -313,13 +451,15 @@ class Metric(object):
     def avg(self):
         return self.sum / self.n
 
-timings=[]
-for epoch in range(resume_from_epoch, args.epochs):
-    start = time.time()
-    train(epoch)
-    print("Epoch ", epoch, " took: ",time.time()-start)
-    timings.append(time.time()-start)
-    validate(epoch)
-    #save_checkpoint(epoch)
+if __name__ == '__main__':
 
-print(timings)
+
+    #freeze_support()
+    try:
+        set_start_method('spawn', force=True)
+    except RuntimeError:
+        print("------------ error!")
+    pass
+    main()
+
+  
