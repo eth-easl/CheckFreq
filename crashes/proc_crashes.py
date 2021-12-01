@@ -50,7 +50,7 @@ f_fail = failure_dist(t1=1.0, t2=0.8, A=0.5, b=24)
 
 while True:
     if (args.goog):
-        interval = f_fail.rvs() / 24 * 3600  # scale to 1hr
+        interval = f_fail.rvs() / 24 * 30 * 60  # scale to 30 min.
 
     stdoutfile = "{}.{}".format(args.stdout, crash_count)
     stderrfile = "{}.{}".format(args.stderr, crash_count)
