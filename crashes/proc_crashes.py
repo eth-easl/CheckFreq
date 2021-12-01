@@ -46,7 +46,7 @@ class failure_dist(rv_continuous):
 
 crash_count = 0
 interval = args.interval
-f_fail = failure_dist(t1=1.0, t2=0.8, A=0.5, b=24)
+f_fail = failure_dist(t1=0.8, t2=0.8, A=0.65, b=24)
 
 while True:
     if (args.goog):
