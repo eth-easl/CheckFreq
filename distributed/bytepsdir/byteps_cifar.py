@@ -287,6 +287,9 @@ def save_checkpoint(epoch, it, prev_epoch, prev_it):
             'optimizer': optimizer.state_dict(),
         }
         torch.save(state, filepath)
+        f = open(filepath, 'a+')
+        os.fsync(f.fileno())
+        f.close()
         del_filepath = args.checkpoint_format.format(epoch=prev_epoch, it=prev_it)
         if os.path.exists(del_filepath):
             os.remove(del_filepath)
