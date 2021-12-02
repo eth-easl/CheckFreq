@@ -696,7 +696,7 @@ def train(train_loader, model, criterion, optimizer, epoch, df, cf_manager):
             print('Epoch: [{0}][{1}/{2}]\t'
                   'Time {batch_time.val:.3f} ({batch_time.avg:.3f}) ({batch_time.sum:.3f})\t'
                   'Speed {3:.3f} ({4:.3f})\t'
-                  'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                  'Data {data_time.val:.3f} ({data_time.avg:.3f}) ({data_time.sum:.3f})\t'
                   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                   'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
                   'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(

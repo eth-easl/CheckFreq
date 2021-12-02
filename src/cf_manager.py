@@ -513,8 +513,6 @@ class CFManager:
 					return self.chk._restore(filepath=filepath, gpu=gpu)
 				except RuntimeError:
 					self.logger.warning("Latest checkpoint {} may be corrupt, attempting second latest checkpoint".format(filepath))
-					self.logger.info("Removing corrupt checkpoint at {}".format(filepath))
-					os.remove(filepath)
 					self.available_chk_iters = self.available_chk_iters[:-1]
 					fname = self.get_latest_checkpoint(latest=latest, epoch=epoch)
 					if fname is None:
