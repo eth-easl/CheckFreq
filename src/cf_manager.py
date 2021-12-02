@@ -111,6 +111,7 @@ class CFManager:
 				self.chk_epoch_subdir = 'epoch'
 				self.mp_manager = Manager()
 				self.snapshot_copy = None
+				self.chk_regex = re.compile(r".*_(\d+)(.*?).chk")
 
 				# used with the 'MANUAL' mode, for cost breakdown
 				self.at_gpu = at_gpu
@@ -504,22 +505,22 @@ class CFManager:
 				If nothing remains to be restore, returns None
 		"""
 		def restore(self, latest=True, epoch=0, gpu=0):
+			def restore_checkpoint():
 				fname = self.get_latest_checkpoint(latest=latest, epoch=epoch)
 				if fname is None:
 					return None
+				match = self.chk_regex.match(fname)
+				if match and match.group(1) != '':
+					self.chk_global_id = int(match.group(1))
 				filepath = self._get_full_path(fname, epoch=not latest)
-				self.logger.info("Latest checkpoint is {}".format(filepath))
-				try:
-					return self.chk._restore(filepath=filepath, gpu=gpu)
-				except RuntimeError:
-					self.logger.warning("Latest checkpoint {} may be corrupt, attempting second latest checkpoint".format(filepath))
-					self.available_chk_iters = self.available_chk_iters[:-1]
-					fname = self.get_latest_checkpoint(latest=latest, epoch=epoch)
-					if fname is None:
-						return None
-					filepath = self._get_full_path(fname, epoch=not latest)
-					self.logger.info("Second latest checkpoint is {}".format(filepath))
-					return self.chk._restore(filepath=filepath, gpu=gpu)
+				self.logger.info("Restoring from checkpoint {}".format(filepath))
+				return self.chk._restore(filepath=filepath, gpu=gpu)
+			try:
+				return restore_checkpoint()
+			except RuntimeError:
+				self.logger.warning("Latest checkpoint may be corrupt, attempting second latest checkpoint")
+				self.available_chk_iters = self.available_chk_iters[:-1]
+				return restore_checkpoint()
 
 
 
