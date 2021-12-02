@@ -15,6 +15,8 @@ from tqdm import tqdm
 import time
 import ctypes 
 import sys
+from statistics import mean
+
 
 sys.path.append('../')
 import dist_chk_bps
@@ -76,8 +78,14 @@ parser.add_argument('--cfreq', type=int, default=-1,
 parser.add_argument('--sync', type=bool, default=False,
                     help='whether to do synchronous checkpoint or not')
 
-parser.add_argument('--prof', type=bool, default=False,
-                    help='whether to do synchronous checkpoint or not')
+parser.add_argument('--profile', type=bool, default=False,
+                    help='whether to profile or not according to CheckFreq')
+
+parser.add_argument('--prof-steps', type=int, default=50,
+                    help='number of steps to profile for')
+
+parser.add_argument('--max-overhead', type=int, default=5,
+                    help='overhead (%) of checkpointing over the total execution')
 
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
@@ -241,21 +249,35 @@ def main():
 
 
 def train(epoch, model, optimizer, train_sampler, train_loader, verbose, in_progress_snapshot, log_writer, \
-            filepath, additional_snapshot, chk, active_snapshot, lock, last_chk_it, change, profile_snap):
+            filepath, additional_snapshot, chk, active_snapshot, lock, last_chk_it, change, \
+            profile_snap):
     print("--------------- Train at epoch ", epoch)
     model.train()
     train_sampler.set_epoch(epoch)
     train_loss = Metric('train_loss')
     train_accuracy = Metric('train_accuracy')
+    
+    iter_dur = []
+    prof_done = False
     start = time.time()
+    cfreq = args.cfreq
+
+    skip_iter = False
+    steps_since_checkp = 0
+    monitor = False
+    monitor_iter = 0
+    mean_it_time = 0
+
     with tqdm(total=len(train_loader),
               desc='Train Epoch     #{}'.format(epoch + 1),
               disable=not verbose) as t:
         it = 0
-        prev_epoch = -1
-        prev_it = -1
         for batch_idx, (data, target) in enumerate(train_loader):
             #adjust_learning_rate(epoch, batch_idx)
+
+            if skip_iter:
+                skip_iter = False
+
             if args.cuda:
                 data, target = data.cuda(), target.cuda()
             #print(data, target)
@@ -275,21 +297,51 @@ def train(epoch, model, optimizer, train_sampler, train_loader, verbose, in_prog
                 loss.backward()
             # Gradient is applied across all ranks
             if (bps.rank()==0):
-
                 ## wait for fine-grained chec
                 start_time = time.time()
                 while in_progress_snapshot.value == 1:
                     continue
                 print("stall for snapshot took: ", time.time()-start_time)
-
             optimizer.step()
+
             t.set_postfix({'loss': train_loss.avg.item(),
                            'accuracy': 100. * train_accuracy.avg.item()})
-            if (bps.rank()==0 and args.cfreq > 0 and it % args.cfreq == 0):
-                save_checkpoint(filepath, model, optimizer, additional_snapshot, chk, active_snapshot, in_progress_snapshot, lock, \
-                                         epoch, it, last_chk_it, change, profile_snap, sync=args.sync)
-                prev_epoch = epoch
-                prev_it = it
+
+            if (bps.rank()==0):
+
+                if (bps.rank()==0 and args.profile and epoch==0 and it >=5 and it < args.prof_steps):
+                    print("---------- Profile step: ", it)
+                    iter_dur.append(time.time()-start)
+
+                elif (args.profile and not prof_done and it == args.prof_steps):
+                    print("---------- Complete profiling")
+                    mean_it_time, cfreq = do_prof(iter_dur,filepath, model, optimizer, additional_snapshot, chk, active_snapshot, \
+                                    in_progress_snapshot, lock, epoch, it, last_chk_it, change, profile_snap)
+                    prof_done = True
+                    skip_iter = True
+                    steps_since_checkp=0
+                    iter_dur = []
+
+                else:
+                    if (cfreq > 0 and steps_since_checkp == cfreq):
+                        save_checkpoint(filepath, model, optimizer, additional_snapshot, chk, active_snapshot, in_progress_snapshot, lock, \
+                                            epoch, it, last_chk_it, change, profile_snap, sync=args.sync)
+                        steps_since_checkp=1
+                    elif (cfreq > 0):
+                        steps_since_checkp+=1
+                
+                if args.profile and prof_done:
+                    if not monitor:
+                        monitor=True
+                    if monitor and not skip_iter:
+                        monitor_iter += 1
+                        if monitor_iter <= cfreq:
+                            iter_dur.append(time.time()-start)
+                        else:
+                            cfreq = adapt_freq(iter_dur, mean_it_time, cfreq)
+                            iter_dur = []
+                            monitor_iter = 0 
+                   
 
             print("it: ", it, " time: ", time.time()-start, len(data))
             t.update(1)
@@ -373,6 +425,54 @@ def accuracy(output, target):
 
 def hello():
     print("hello")
+
+def do_prof(iter_dur,filepath, model, optimizer, additional_snapshot, chk, active_snapshot, \
+                in_progress_snapshot, lock, epoch, it, last_chk_it, change, profile_snap):
+
+    print(iter_dur)
+    t_i = mean(iter_dur)
+
+    ## first, do a simple checkpoint call to create the background processes
+    save_checkpoint(filepath, model,optimizer, additional_snapshot, chk, active_snapshot, in_progress_snapshot, lock, \
+                        epoch, it, last_chk_it, change, profile_snap, prof_all=True)
+
+    ## now measure the time the snapshot takes
+    start = time.time()
+    save_checkpoint(filepath, model,optimizer, additional_snapshot, chk, active_snapshot, in_progress_snapshot, lock, \
+                        epoch, it, last_chk_it, change, profile_snap, prof_snap=True)
+    overhead = time.time()-start
+
+    ## finally, measure the time the actual checkpoint (snapshot + persist) takes
+    start = time.time()
+    save_checkpoint(filepath, model,optimizer, additional_snapshot, chk, active_snapshot, in_progress_snapshot, lock, \
+                        epoch, it, last_chk_it, change, profile_snap, prof_all=True)
+    t_f = time.time()-start        
+
+    ## Check Freq:
+    chk_freq = max(math.ceil((t_f - overhead)/t_i), 1)
+    print("t_i: ", t_i, " , overhead: ", overhead, " , t_f: ", t_f) 
+    print("------------ CheckFreq found: ", chk_freq)
+
+    return t_i, chk_freq
+
+
+def adapt_freq(iter_dur, mean_it_time, cfreq):
+    cur_iter_mean = mean(iter_dur)
+    cur_total = sum(iter_dur)
+    old_total = mean_it_time * len(iter_dur)
+
+    overhead_full = cur_total-old_total
+    overhead_perc = 100 * overhead_full/old_total
+
+    print("--------------- Iter mean new is: ", cur_iter_mean)
+    print("--------------- Overhead is: ", overhead_perc)
+
+    if overhead_perc > args.max_overhead:
+        cfreq += 2
+        print("-------------------------------- New Checkpoint Freq found: ", cfreq)
+
+    return cfreq
+        
 
 def save_checkpoint(filepath, model, optimizer, additional_snapshot, chk, active_snapshot, in_progress_snapshot, lock, \
                         epoch, it, last_chk_it, change, profile_snap,  sync=False, prof_snap=False, prof_all=False):
