@@ -377,15 +377,16 @@ def hello():
 def save_checkpoint(filepath, model, optimizer, additional_snapshot, chk, active_snapshot, in_progress_snapshot, lock, \
                         epoch, it, last_chk_it, change, profile_snap,  sync=False, prof_snap=False, prof_all=False):
 
+    start = time.time()
     filepath.value = args.checkpoint_format.format(epoch=epoch, it=it)
     additional_snapshot['epoch'] = epoch
     additional_snapshot['iter'] = it
     print(chk.chk_process)
 
-    print("----------- FROM WORKER, MODEL: fc.bias: ", model.state_dict()['fc.bias'])
-    skeys = list(optimizer.state_dict()['state'].keys())
-    k = skeys[-1]
-    print("---- from WORKER, OPT: ", k, optimizer.state_dict()['state'][k])
+    #print("----------- FROM WORKER, MODEL: fc.bias: ", model.state_dict()['fc.bias'])
+    #skeys = list(optimizer.state_dict()['state'].keys())
+    #k = skeys[-1]
+    #print("---- from WORKER, OPT: ", k, optimizer.state_dict()['state'][k])
 
     if sync:
         chk._serialize_and_persist(filepath,  active_snapshot, in_progress_snapshot, lock, 1, \
@@ -407,7 +408,6 @@ def save_checkpoint(filepath, model, optimizer, additional_snapshot, chk, active
 
         fn = Process #globals()["Process"]	
 
-        print("self spanwned is: ", chk.spawned)
         with lock:
                 change.value = 1
 
@@ -429,10 +429,11 @@ def save_checkpoint(filepath, model, optimizer, additional_snapshot, chk, active
             chk.spawned = True
 
         # wait for the checkpoint/snapshot to complete if needed
-        if profile_snap or prof_all or sync:
+        if prof_snap or prof_all or sync:
             while change.value==1:		
                 continue
-        
+    
+    print("store checkp took: ", time.time() - start)  
 
 # BytePS: average metrics from distributed training.
 class Metric(object):

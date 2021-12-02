@@ -132,8 +132,8 @@ class CFCheckpoint(object):
 			skeys = list(snapshot['optimizer']['state'].keys())
 			k = skeys[-1]
 
-			print("---- from checkpoint, MODEL: ", 'fc.bias', snapshot['model']['fc.bias'])
-			print("---- from checkpoint, OPT: ", k, snapshot['optimizer']['state'][k])
+			#print("---- from checkpoint, MODEL: ", 'fc.bias', snapshot['model']['fc.bias'])
+			#print("---- from checkpoint, OPT: ", k, snapshot['optimizer']['state'][k])
 			# print("Saving : {}".format(filepath))
 			torch.save(snapshot, filepath.value)
 			# print("Saved : {}".format(filepath))
