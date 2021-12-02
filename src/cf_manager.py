@@ -111,7 +111,7 @@ class CFManager:
 				self.chk_epoch_subdir = 'epoch'
 				self.mp_manager = Manager()
 				self.snapshot_copy = None
-				self.chk_regex = re.compile(r".*_(\d+)(.*?).chk")
+				self.chk_regex = re.compile(r".*_(\d+)(.*?)")
 
 				# used with the 'MANUAL' mode, for cost breakdown
 				self.at_gpu = at_gpu
