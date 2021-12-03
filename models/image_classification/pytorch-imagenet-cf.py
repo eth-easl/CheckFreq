@@ -390,12 +390,16 @@ def main():
     args.steps_so_far = 0
     extra_state=None
     if args.resume:
+        cf_restore_start_time = time.time()
         extra_state = cf_manager.restore(gpu=args.gpu)
+        cf_restore_time = time.time() - cf_restore_start_time
         if extra_state is not None:
             args.start_epoch = extra_state['epoch']
             args.start_index = extra_state['start_index']
             args.steps_so_far = extra_state['steps_so_far']
+            total_restore_time = time.time() - start
             print("Populated: epoch :{}, start_idx:{}, steps_so_far:{}".format(args.start_epoch,args.start_index,args.steps_so_far))
+            print("CF RESTORE TIME: cf_manager.restore: {}, total: {}".format(cf_restore_time, total_restore_time))
         
         #if os.path.isfile(args.resume):
         #    print("=> loading checkpoint '{}'".format(args.resume))
@@ -690,9 +694,9 @@ def train(train_loader, model, criterion, optimizer, epoch, df, cf_manager):
 
         if args.local_rank == 0 and i % args.print_freq == 0 and i > 1:
             print('Epoch: [{0}][{1}/{2}]\t'
-                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f}) ({batch_time.sum:.3f})\t'
                   'Speed {3:.3f} ({4:.3f})\t'
-                  'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                  'Data {data_time.val:.3f} ({data_time.avg:.3f}) ({data_time.sum:.3f})\t'
                   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                   'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
                   'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(

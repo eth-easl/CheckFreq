@@ -111,6 +111,7 @@ class CFManager:
 				self.chk_epoch_subdir = 'epoch'
 				self.mp_manager = Manager()
 				self.snapshot_copy = None
+				self.chk_regex = re.compile(r".*_(\d+)(.*?)")
 
 				# used with the 'MANUAL' mode, for cost breakdown
 				self.at_gpu = at_gpu
@@ -504,13 +505,23 @@ class CFManager:
 				If nothing remains to be restore, returns None
 		"""
 		def restore(self, latest=True, epoch=0, gpu=0):
+			def restore_checkpoint():
 				fname = self.get_latest_checkpoint(latest=latest, epoch=epoch)
 				if fname is None:
 					return None
+				match = self.chk_regex.match(fname)
+				if match and match.group(1) != '':
+					self.chk_global_id = int(match.group(1))
 				filepath = self._get_full_path(fname, epoch=not latest)
-				self.logger.info("Latest checkpoint is {}".format(filepath))
-				extra_state = self.chk._restore(filepath=filepath, gpu=gpu)
-				return extra_state
+				self.logger.info("Restoring from checkpoint {}".format(filepath))
+				return self.chk._restore(filepath=filepath, gpu=gpu)
+			try:
+				return restore_checkpoint()
+			except (RuntimeError, TypeError):
+				self.logger.warning("Latest checkpoint may be corrupt, attempting second latest checkpoint")
+				self.available_chk_iters = self.available_chk_iters[:-1]
+				return restore_checkpoint()
+
 
 
 		def initalize_chk_dir(self):
@@ -579,7 +590,7 @@ class CFManager:
 						optimizer.step()
 						#torch.cuda.synchronize()
 						dur = time.time() - s
-						self.logger.info("Stall to weight update = {}s".format(dur))
+						# self.logger.info("Stall to weight update = {}s".format(dur))
 				else:	
 						self.logger.info("NO Optimizer found")
 

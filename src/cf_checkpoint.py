@@ -379,7 +379,7 @@ Returns True on success, False otherwise
 				ref.load_state_dict(checkpoint[name])
 				del checkpoint[name]
 			except ValueError:
-				print("Corrupt checkpoint")
+				raise RuntimeError("Corrupt checkpoint")
 
 		if len(checkpoint.keys()) > 0:
 			return checkpoint
