@@ -17,6 +17,13 @@ import ctypes
 import sys
 from statistics import mean
 
+try:
+    from nvidia.dali.plugin.pytorch import DALIClassificationIterator
+    from nvidia.dali.pipeline import Pipeline
+    import nvidia.dali.ops as ops
+    import nvidia.dali.types as types
+except ImportError:
+    raise ImportError("Please install DALI from https://www.github.com/NVIDIA/DALI to run this example.")
 
 sys.path.append('../')
 import dist_chk_bps
@@ -87,12 +94,104 @@ parser.add_argument('--prof-steps', type=int, default=50,
 parser.add_argument('--max-overhead', type=int, default=5,
                     help='overhead (%) of checkpointing over the total execution')
 
+parser.add_argument('--dali', type=bool, default=False,
+                    help='whether to use the (CoorDL) DALI library for data loading or not')
+
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
 
 pushpull_batch_size = args.batch_size * args.batches_per_pushpull
 
-def main():
+class HybridTrainPipe(Pipeline):
+    def __init__(self, batch_size, num_threads, device_id, data_dir, crop, dali_cpu=False, resume_index=0, resume_epoch=0):
+        super(HybridTrainPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
+
+        world_size = bps.size()
+        nnodes = 1
+
+        #TODO: fix local and node rank when >1 GPUs are used per node
+        local_rank = bps.rank()
+        node_rank = 0
+
+        shard = int(node_rank*world_size/nnodes + local_rank)
+        print(shard, local_rank, world_size)
+        # if args.mint:
+        #     self.input = ops.FileReader(file_root=data_dir, shard_id=shard, num_shards=args.world_size, shuffle_after_epoch=True, cache_size=args.cache_size)
+        # else:
+        cf_det=True
+        if not resume_index and not resume_epoch and not args.cf_iterator:
+            cf_det=False
+            self.input = ops.FileReader(file_root=data_dir, shard_id=shard, num_shards=world_size, shuffle_after_epoch=True)
+        else:
+            self.input = ops.FileReader(file_root=data_dir, shard_id=shard, num_shards=world_size, shuffle_after_epoch=True, resume_index=resume_index, resume_epoch=resume_epoch, cf_det=cf_det)
+            
+        print("CF deterministic shuffling is {}".format(cf_det))
+
+
+        #let user decide which pipeline works him bets for RN version he runs
+        dali_device = 'cpu' if dali_cpu else 'gpu'
+        #decoder_device = 'cpu' 
+        decoder_device = 'cpu' if dali_cpu else 'mixed'
+        # This padding sets the size of the internal nvJPEG buffers to be able to handle all images from full-sized ImageNet
+        # without additional reallocations
+        device_memory_padding = 211025920 if decoder_device == 'mixed' else 0
+        host_memory_padding = 140544512 if decoder_device == 'mixed' else 0
+        self.decode = ops.ImageDecoderRandomCrop(device=decoder_device, output_type=types.RGB,
+                                                 device_memory_padding=device_memory_padding,
+                                                 host_memory_padding=host_memory_padding,
+                                                 random_aspect_ratio=[0.8, 1.25],
+                                                 random_area=[0.1, 1.0],
+                                                 num_attempts=100)
+        self.res = ops.Resize(device=dali_device, resize_x=crop, resize_y=crop, interp_type=types.INTERP_TRIANGULAR)
+        self.cmnp = ops.CropMirrorNormalize(device="gpu",
+                                            output_dtype=types.FLOAT,
+                                            output_layout=types.NCHW,
+                                            crop=(crop, crop),
+                                            image_type=types.RGB,
+                                            mean=[0.4914 * 255, 0.4822 * 255, 0.4465 * 255],
+                                            std=[0.2023 * 255, 0.1994 * 255, 0.2010 * 255])
+        self.coin = ops.CoinFlip(probability=0.5)
+        print('DALI "{0}" variant'.format(dali_device))
+
+    def define_graph(self):
+        rng = self.coin()
+        self.jpegs, self.labels = self.input(name="Reader")
+        images = self.decode(self.jpegs)
+        images = self.res(images)
+        output = self.cmnp(images.gpu(), mirror=rng)
+        return [output, self.labels]
+
+class HybridValPipe(Pipeline):
+    def __init__(self, batch_size, num_threads, device_id, data_dir, crop, size):
+        super(HybridValPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
+
+        world_size=bps.size()
+        node_rank = 0
+        local_rank = bps.rank()
+        nnodes=1
+
+        shard = int(node_rank*world_size/nnodes + local_rank)
+        self.input = ops.FileReader(file_root=data_dir, shard_id=shard, num_shards=world_size, random_shuffle=False)
+        self.decode = ops.ImageDecoder(device="cpu", output_type=types.RGB)
+        self.res = ops.Resize(device="cpu", resize_shorter=size, interp_type=types.INTERP_TRIANGULAR)
+        self.cmnp = ops.CropMirrorNormalize(device="gpu",
+                                            output_dtype=types.FLOAT,
+                                            output_layout=types.NCHW,
+                                            crop=(crop, crop),
+                                            image_type=types.RGB,
+                                            mean=[0.4914 * 255, 0.4822 * 255, 0.4465 * 255],
+                                            std=[0.2023 * 255, 0.1994 * 255, 0.2010 * 255])
+
+    def define_graph(self):
+        self.jpegs, self.labels = self.input(name="Reader")
+        images = self.decode(self.jpegs)
+        images = self.res(images)
+        output = self.cmnp(images.gpu())
+        return [output, self.labels]
+
+
+
+def main():  
 
     bps.init()
 
@@ -126,40 +225,54 @@ def main():
     # BytePS: write TensorBoard logs on first worker.
     log_writer = tensorboardX.SummaryWriter(args.log_dir) if bps.rank() == 0 else None
 
-    print(bps.size(), bps.rank(), pushpull_batch_size)
-    kwargs = {'num_workers': 4, 'pin_memory': True} if args.cuda else {}
-    train_dataset = \
-        datasets.ImageFolder(args.train_dir,
-                            transform=transforms.Compose([
-                                transforms.RandomResizedCrop(224),
-                                transforms.RandomHorizontalFlip(),
-                                transforms.ToTensor(),
-                                transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
-                                        std=[0.2023, 0.1994, 0.2010])
-                            ]))
-    # BytePS: use DistributedSampler to partition data among workers. Manually specify
-    # `num_replicas=bps.size()` and `rank=bps.rank()`.
-    train_sampler = torch.utils.data.distributed.DistributedSampler(
-        train_dataset, num_replicas=bps.size(), rank=bps.rank())
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=pushpull_batch_size,  #shuffle=True, **kwargs)
-        sampler=train_sampler, **kwargs)
+    if args.dali:
+        print("Use (CoorDL) Dali library")
+        crop_size=224
+        val_size = 256
+        pipe = HybridTrainPipe(batch_size=args.batch_size, num_threads=4, device_id=0, data_dir=args.train_dir, crop=crop_size, dali_cpu=0)
+        pipe.build()
+        train_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / bps.size()), fill_last_batch=False, resume_size=0) # TODO: FIX RESUME SIZE
+        
+        pipe_val = HybridValPipe(batch_size=args.batch_size, num_threads=4, device_id=0, data_dir=args.val_dir, crop=crop_size, size=val_size)
+        pipe_val.build()
+        val_loader = DALIClassificationIterator(pipe_val, size=int(pipe_val.epoch_size("Reader") / args.world_size))
 
-    val_dataset = \
-        datasets.ImageFolder(args.val_dir,
-                            transform=transforms.Compose([
-                                transforms.Resize(256),
-                                transforms.CenterCrop(224),
-                                transforms.ToTensor(),
-                                transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
-                                        std=[0.2023, 0.1994, 0.2010])
-                            ]))
-    val_sampler = torch.utils.data.distributed.DistributedSampler(
-        val_dataset, num_replicas=bps.size(), rank=bps.rank())
-    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.val_batch_size, #shuffle=False, **kwargs)
-                                            sampler=val_sampler, **kwargs)
+    else:
+        print("Use the native data loader")
+        kwargs = {'num_workers': 4, 'pin_memory': True} if args.cuda else {}
+        train_dataset = \
+            datasets.ImageFolder(args.train_dir,
+                                    transform=transforms.Compose([
+                                        transforms.RandomResizedCrop(224),
+                                        transforms.RandomHorizontalFlip(),
+                                        transforms.ToTensor(),
+                                        transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
+                                            std=[0.2023, 0.1994, 0.2010])
+                                ]))
+            # BytePS: use DistributedSampler to partition data among workers. Manually specify
+            # `num_replicas=bps.size()` and `rank=bps.rank()`.
+        train_sampler = torch.utils.data.distributed.DistributedSampler(
+                    train_dataset, num_replicas=bps.size(), rank=bps.rank())
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=pushpull_batch_size,  #shuffle=True, **kwargs)
+                sampler=train_sampler, **kwargs)
+
+        val_dataset = \
+            datasets.ImageFolder(args.val_dir,
+                                transform=transforms.Compose([
+                                    transforms.Resize(256),
+                                    transforms.CenterCrop(224),
+                                    transforms.ToTensor(),
+                                    transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
+                                                std=[0.2023, 0.1994, 0.2010])
+                                ]))
+        val_sampler = torch.utils.data.distributed.DistributedSampler(
+                        val_dataset, num_replicas=bps.size(), rank=bps.rank())
+        val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.val_batch_size, #shuffle=False, **kwargs)
+                                                    sampler=val_sampler, **kwargs)
 
 
+    ##########################################################################################################################################
     # get model
     model = models.__dict__[args.arch](num_classes=10)
 
@@ -253,7 +366,15 @@ def train(epoch, model, optimizer, train_sampler, train_loader, verbose, in_prog
             profile_snap):
     print("--------------- Train at epoch ", epoch)
     model.train()
-    train_sampler.set_epoch(epoch)
+
+
+    if args.dali:
+        train_loader.reset()
+        #val_loader.reset()
+    else:
+        # TODO: is this to restart the train loader? check this
+        train_sampler.set_epoch(epoch)
+
     train_loss = Metric('train_loss')
     train_accuracy = Metric('train_accuracy')
     
@@ -272,14 +393,18 @@ def train(epoch, model, optimizer, train_sampler, train_loader, verbose, in_prog
               desc='Train Epoch     #{}'.format(epoch + 1),
               disable=not verbose) as t:
         it = 0
-        for batch_idx, (data, target) in enumerate(train_loader):
+        for batch_idx, batch in enumerate(train_loader):
             #adjust_learning_rate(epoch, batch_idx)
 
             if skip_iter:
                 skip_iter = False
 
             if args.cuda:
-                data, target = data.cuda(), target.cuda()
+                if args.dali:
+                    data = batch[0]["data"]
+                    target = batch[0]["label"].squeeze().cuda().long()
+                else:
+                    data, target = batch[0].cuda(), batch[1].cuda()
             #print(data, target)
             # TODO: could this affect checkpoint?
             optimizer.zero_grad()
@@ -348,6 +473,11 @@ def train(epoch, model, optimizer, train_sampler, train_loader, verbose, in_prog
             start = time.time()
             it += 1
 
+        # do a synchronous checkpoint at the end of the epoch
+        save_checkpoint(filepath, model, optimizer, additional_snapshot, chk, active_snapshot, in_progress_snapshot, lock, \
+                                    epoch, it, last_chk_it, change, profile_snap, sync=True)
+        steps_since_checkp = 0
+
     if log_writer:
         log_writer.add_scalar('train/loss', train_loss.avg, epoch)
         log_writer.add_scalar('train/accuracy', train_accuracy.avg, epoch)
@@ -355,6 +485,7 @@ def train(epoch, model, optimizer, train_sampler, train_loader, verbose, in_prog
 
 def validate(epoch, model, val_loader, verbose, log_writer):
     model.eval()
+    # TODO: need to reset the val loader?
     val_loss = Metric('val_loss')
     val_accuracy = Metric('val_accuracy')
 
@@ -362,10 +493,14 @@ def validate(epoch, model, val_loader, verbose, log_writer):
               desc='Validate Epoch  #{}'.format(epoch + 1),
               disable=not verbose) as t:
         with torch.no_grad():
-            for data, target in val_loader:
+            for batch in val_loader:
                 #print(data, target)
                 if args.cuda:
-                    data, target = data.cuda(), target.cuda()
+                    if args.dali:
+                        data = batch[0]["data"]
+                        target = batch[0]["label"].squeeze().cuda().long()
+                    else:
+                        data, target = batch[0].cuda(), batch[1].cuda()
                 output = model(data)
 
                 val_loss.update(F.cross_entropy(output, target))
