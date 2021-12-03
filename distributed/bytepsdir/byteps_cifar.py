@@ -119,11 +119,11 @@ class HybridTrainPipe(Pipeline):
         #     self.input = ops.FileReader(file_root=data_dir, shard_id=shard, num_shards=args.world_size, shuffle_after_epoch=True, cache_size=args.cache_size)
         # else:
         cf_det=True
-        if not resume_index and not resume_epoch and not args.cf_iterator:
-            cf_det=False
-            self.input = ops.FileReader(file_root=data_dir, shard_id=shard, num_shards=world_size, shuffle_after_epoch=True)
-        else:
-            self.input = ops.FileReader(file_root=data_dir, shard_id=shard, num_shards=world_size, shuffle_after_epoch=True, resume_index=resume_index, resume_epoch=resume_epoch, cf_det=cf_det)
+        #if not resume_index and not resume_epoch:
+        #    cf_det=False
+        #    self.input = ops.FileReader(file_root=data_dir, shard_id=shard, num_shards=world_size, shuffle_after_epoch=True)
+        #else:
+        self.input = ops.FileReader(file_root=data_dir, shard_id=shard, num_shards=world_size, shuffle_after_epoch=True, resume_index=resume_index, resume_epoch=resume_epoch, cf_det=cf_det)
             
         print("CF deterministic shuffling is {}".format(cf_det))
 
@@ -231,12 +231,13 @@ def main():
         val_size = 256
         pipe = HybridTrainPipe(batch_size=args.batch_size, num_threads=4, device_id=0, data_dir=args.train_dir, crop=crop_size, dali_cpu=0)
         pipe.build()
-        train_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / bps.size()), fill_last_batch=False, resume_size=0) # TODO: FIX RESUME SIZE
-        
+        print("-------------- Reader size: ", pipe.epoch_size("Reader"))
+        resume_size = int(pipe.epoch_size("Reader") / bps.size()) # TODO: change this in order to reload
+        train_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / bps.size()), fill_last_batch=False, resume_size=resume_size)         
         pipe_val = HybridValPipe(batch_size=args.batch_size, num_threads=4, device_id=0, data_dir=args.val_dir, crop=crop_size, size=val_size)
         pipe_val.build()
-        val_loader = DALIClassificationIterator(pipe_val, size=int(pipe_val.epoch_size("Reader") / args.world_size))
-
+        val_loader = DALIClassificationIterator(pipe_val, size=int(pipe_val.epoch_size("Reader") / bps.size()))
+        train_sampler = None
     else:
         print("Use the native data loader")
         kwargs = {'num_workers': 4, 'pin_memory': True} if args.cuda else {}
@@ -389,7 +390,13 @@ def train(epoch, model, optimizer, train_sampler, train_loader, verbose, in_prog
     monitor_iter = 0
     mean_it_time = 0
 
-    with tqdm(total=len(train_loader),
+    if args.dali:
+       train_loader_len = int(math.ceil(train_loader._size / args.batch_size))
+    else:
+       train_loader_len = len(train_loader)
+    print("Len: ", train_loader_len)
+
+    with tqdm(total=train_loader_len,
               desc='Train Epoch     #{}'.format(epoch + 1),
               disable=not verbose) as t:
         it = 0
@@ -488,8 +495,12 @@ def validate(epoch, model, val_loader, verbose, log_writer):
     # TODO: need to reset the val loader?
     val_loss = Metric('val_loss')
     val_accuracy = Metric('val_accuracy')
+    if args.dali:
+       val_loader_len = int(math.ceil(val_loader._size / args.batch_size))
+    else:
+       val_loader_len = len(val_loader)
 
-    with tqdm(total=len(val_loader),
+    with tqdm(total=val_loader_len,
               desc='Validate Epoch  #{}'.format(epoch + 1),
               disable=not verbose) as t:
         with torch.no_grad():
