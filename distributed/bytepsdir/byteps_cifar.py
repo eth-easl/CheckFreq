@@ -16,6 +16,7 @@ import time
 import ctypes 
 import sys
 from statistics import mean
+import glob
 
 try:
     from nvidia.dali.plugin.pytorch import DALIClassificationIterator
@@ -205,19 +206,6 @@ def main():
 
     cudnn.benchmark = True
 
-    # If set > 0, will resume training from a given checkpoint.
-
-    resume_from_epoch = 0
-    '''
-    for try_epoch in range(args.epochs, 0, -1):
-        if os.path.exists(args.checkpoint_format.format(epoch=try_epoch)):
-            resume_from_epoch = try_epoch
-            break
-    '''
-    # BytePS: broadcast resume_from_epoch from rank 0 (which will have
-    # checkpoints) to other ranks.
-    #resume_from_epoch = bps.broadcast(torch.tensor(resume_from_epoch), root_rank=0,
-    #                                  name='resume_from_epoch').item()
 
     # BytePS: print logs on the first worker.
     verbose = 1 if bps.rank() == 0 else 0
@@ -293,26 +281,51 @@ def main():
 
     # BytePS: wrap optimizer with DistributedOptimizer.
 
-    optimizer = bps.DistributedOptimizer(
-        optimizer, named_parameters=model.named_parameters(),
-        compression=compression,
-        backward_passes_per_step=args.batches_per_pushpull)
+    #optimizer = bps.DistributedOptimizer(
+    #    optimizer, named_parameters=model.named_parameters(),
+    #    compression=compression,
+    #    backward_passes_per_step=args.batches_per_pushpull)
 
 
-    # Restore from a previous checkpoint, if initial_epoch is specified.
+    # Restore from the latest (valid) checkpoint 
     # BytePS: restore on the first worker which will broadcast weights to other workers.
-    if resume_from_epoch > 0 and bps.rank() == 0:
-        filepath = args.checkpoint_format.format(epoch=resume_from_epoch)
-        checkpoint = torch.load(filepath)
-        model.load_state_dict(checkpoint['model'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
+    start_epoch = 0
+    start_it = 0
+    if bps.rank() == 0:
+        dirpath = '/datadrive/home/ubuntu/CheckFreq/distributed/bytepsdir/'
+        files = filter( os.path.isfile, glob.glob(dirpath + '*.chk'))
+        files = sorted(files, key=os.path.getmtime)
+        if (len(files) > 0): 
+           try:
+              start_epoch, start_it = load_checkpoint(files[-1], model, optimizer)
+           except:
+              start_epoch, start_it = load_checkpoint(files[-2], model, optimizer)
+
+           start_it += 1 # TODO; fix this for end-of-epoch checkpoints
+
+    params = model.state_dict()
+    params['it'] = torch.tensor(start_it, dtype=torch.int32)
+    params['epoch'] = torch.tensor(start_epoch, dtype=torch.int32)
+    
+    print(bps.rank(), params['it'], params['epoch'])
 
     # BytePS: broadcast parameters & optimizer state.
-    bps.broadcast_parameters(model.state_dict(), root_rank=0)
+    bps.broadcast_parameters(params, root_rank=0)
     bps.broadcast_optimizer_state(optimizer, root_rank=0)
 
     #print(model.state_dict())
-    print(bps.rank())
+    start_it = params['it'].item()
+    start_epoch = params['epoch'].item()
+
+    print(bps.rank(), start_it, start_epoch)
+    params.pop('it')
+    params.pop('epoch')
+
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            param.copy_(params[name])
+
+    #print(model.state_dict())
     #print(train_loader[0])
     train_it = enumerate(train_loader)
     #print(len(train_it))
@@ -350,9 +363,13 @@ def main():
     additional_snapshot = mp_manager.dict()
 
     timings=[]
-    for epoch in range(resume_from_epoch, args.epochs):
+    for epoch in range(start_epoch, args.epochs):
+        if (epoch==start_epoch):
+            iteration = start_it
+        else:
+            iteration = 0
         start = time.time()
-        train(epoch, model, optimizer, train_sampler, train_loader, verbose, in_progress_snapshot, log_writer, \
+        train(epoch, iteration, model, optimizer, train_sampler, train_loader, verbose, in_progress_snapshot, log_writer, \
                  filepath, additional_snapshot, chk, active_snapshot, lock, last_chk_it, change, profile_snap)
         print("Epoch ", epoch, " took: ",time.time()-start)
         timings.append(time.time()-start)
@@ -362,12 +379,11 @@ def main():
     print(timings)
 
 
-def train(epoch, model, optimizer, train_sampler, train_loader, verbose, in_progress_snapshot, log_writer, \
+def train(epoch, iteration, model, optimizer, train_sampler, train_loader, verbose, in_progress_snapshot, log_writer, \
             filepath, additional_snapshot, chk, active_snapshot, lock, last_chk_it, change, \
             profile_snap):
     print("--------------- Train at epoch ", epoch)
     model.train()
-
 
     if args.dali:
         train_loader.reset()
@@ -375,6 +391,11 @@ def train(epoch, model, optimizer, train_sampler, train_loader, verbose, in_prog
     else:
         # TODO: is this to restart the train loader? check this
         train_sampler.set_epoch(epoch)
+
+    train_iter = enumerate(train_loader)
+
+    for _ in range(iteration):
+        next(train_iter)
 
     train_loss = Metric('train_loss')
     train_accuracy = Metric('train_accuracy')
@@ -394,13 +415,15 @@ def train(epoch, model, optimizer, train_sampler, train_loader, verbose, in_prog
        train_loader_len = int(math.ceil(train_loader._size / args.batch_size))
     else:
        train_loader_len = len(train_loader)
+
+    train_loader_len -= iteration
     print("Len: ", train_loader_len)
 
     with tqdm(total=train_loader_len,
               desc='Train Epoch     #{}'.format(epoch + 1),
               disable=not verbose) as t:
-        it = 0
-        for batch_idx, batch in enumerate(train_loader):
+        it = iteration
+        for batch_idx, batch in train_iter:
             #adjust_learning_rate(epoch, batch_idx)
 
             if skip_iter:
@@ -530,6 +553,14 @@ def validate(epoch, model, val_loader, verbose, log_writer):
  
 
 
+def load_checkpoint(filepath, model, optimizer):
+    checkpoint = torch.load(filepath)
+    model.load_state_dict(checkpoint['model'])
+    optimizer.load_state_dict(checkpoint['optimizer'])
+    ep = checkpoint['epoch']
+    iteration = checkpoint['iter']
+    return ep, iteration
+
 # BytePS: using `lr = base_lr * bps.size()` from the very beginning leads to worse final
 # accuracy. Scale the learning rate `lr = base_lr` ---> `lr = base_lr * bps.size()` during
 # the first five epochs. See https://arxiv.org/abs/1706.02677 for details.
@@ -623,6 +654,13 @@ def adapt_freq(iter_dur, mean_it_time, cfreq):
 def save_checkpoint(filepath, model, optimizer, additional_snapshot, chk, active_snapshot, in_progress_snapshot, lock, \
                         epoch, it, last_chk_it, change, profile_snap,  sync=False, prof_snap=False, prof_all=False):
 
+    '''
+    d = {"model": model.state_dict(), "opt": optimizer.state_dict()}
+    torch.save(d, 'test.chk')
+    f = open('test.chk', 'a+')
+    os.fsync(f.fileno())
+    f.close()
+    '''
     start = time.time()
     filepath.value = args.checkpoint_format.format(epoch=epoch, it=it)
     additional_snapshot['epoch'] = epoch

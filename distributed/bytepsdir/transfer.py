@@ -11,5 +11,5 @@ nodes.remove(driver_node_id)
 
 for x in nodes:
     print(x)
-    cmd = 'scp -i /home/ubuntu/ray_bootstrap_key.pem -r /home/ubuntu/bytepsdir ubuntu@' + x + ':/home/ubuntu/'
+    cmd = 'scp -i /home/ubuntu/ray_bootstrap_key.pem -r /home/ubuntu/CheckFreq/distributed/bytepsdir ubuntu@' + x + ':/home/ubuntu/CheckFreq/distributed/'
     os.system(cmd)

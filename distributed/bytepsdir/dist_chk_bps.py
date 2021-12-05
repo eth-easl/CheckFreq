@@ -59,7 +59,6 @@ class CFCheckpoint(object):
 				else:
 					self.latest_snapshot[name] = {}
 					for n,r in ref.items():
-						#print(n)
 						self.latest_snapshot[name][n] = _to_cpu(r)
 						#print(n, r._grad.shape)
 					#self.latest_snapshot[name] = copy.deepcopy(ref)
@@ -179,8 +178,10 @@ def update_stats(filepath, overwrite = True, iter_chk=None):
 
 def _to_cpu(ele, snapshot=None):
 	#while True:
+         
         if snapshot is None:
             snapshot = {}
+
         if hasattr(ele, 'cpu'):
             snapshot = ele.cpu()
         elif isinstance(ele, dict):
@@ -192,5 +193,6 @@ def _to_cpu(ele, snapshot=None):
             snapshot  = [None for _ in range(len(ele))]
             for idx, v in enumerate(ele):
                 snapshot[idx] = _to_cpu(v, snapshot[idx])
-
+        else:
+            return ele
         return snapshot		
