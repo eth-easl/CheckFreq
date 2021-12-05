@@ -17,6 +17,7 @@ import ctypes
 import sys
 from statistics import mean
 import glob
+import logging
 
 try:
     from nvidia.dali.plugin.pytorch import DALIClassificationIterator
@@ -206,6 +207,7 @@ def main():
 
     cudnn.benchmark = True
 
+    logging.basicConfig(filename='log_file', filemode='a', level=logging.INFO)
 
     # BytePS: print logs on the first worker.
     verbose = 1 if bps.rank() == 0 else 0
@@ -291,6 +293,13 @@ def main():
     # BytePS: restore on the first worker which will broadcast weights to other workers.
     start_epoch = 0
     start_it = 0
+   
+    ## for logging time
+    ttotal=0
+    tstore=0
+    tload=0
+
+    start_load = time.time()
     if bps.rank() == 0:
         dirpath = '/datadrive/home/ubuntu/CheckFreq/distributed/bytepsdir/'
         files = filter( os.path.isfile, glob.glob(dirpath + '*.chk'))
@@ -302,7 +311,8 @@ def main():
               start_epoch, start_it = load_checkpoint(files[-2], model, optimizer)
 
            start_it += 1 # TODO; fix this for end-of-epoch checkpoints
-
+    tload += time.time()-start_load
+ 	
     params = model.state_dict()
     params['it'] = torch.tensor(start_it, dtype=torch.int32)
     params['epoch'] = torch.tensor(start_epoch, dtype=torch.int32)
@@ -368,8 +378,9 @@ def main():
             iteration = start_it
         else:
             iteration = 0
+        
         start = time.time()
-        train(epoch, iteration, model, optimizer, train_sampler, train_loader, verbose, in_progress_snapshot, log_writer, \
+        train(epoch, tload, iteration, model, optimizer, train_sampler, train_loader, verbose, in_progress_snapshot, log_writer, \
                  filepath, additional_snapshot, chk, active_snapshot, lock, last_chk_it, change, profile_snap)
         print("Epoch ", epoch, " took: ",time.time()-start)
         timings.append(time.time()-start)
@@ -379,12 +390,14 @@ def main():
     print(timings)
 
 
-def train(epoch, iteration, model, optimizer, train_sampler, train_loader, verbose, in_progress_snapshot, log_writer, \
+def train(epoch, tload, iteration, model, optimizer, train_sampler, train_loader, verbose, in_progress_snapshot, log_writer, \
             filepath, additional_snapshot, chk, active_snapshot, lock, last_chk_it, change, \
             profile_snap):
     print("--------------- Train at epoch ", epoch)
     model.train()
 
+    ttotal = 0
+    tstore = 0
     if args.dali:
         train_loader.reset()
         #val_loader.reset()
@@ -456,6 +469,7 @@ def train(epoch, iteration, model, optimizer, train_sampler, train_loader, verbo
                 start_time = time.time()
                 while in_progress_snapshot.value == 1:
                     continue
+                tstore += time.time()-start_time
                 print("stall for snapshot took: ", time.time()-start_time)
             optimizer.step()
 
@@ -479,9 +493,11 @@ def train(epoch, iteration, model, optimizer, train_sampler, train_loader, verbo
 
                 else:
                     if (cfreq > 0 and steps_since_checkp == cfreq):
+                        chk_start = time.time()
                         save_checkpoint(filepath, model, optimizer, additional_snapshot, chk, active_snapshot, in_progress_snapshot, lock, \
                                             epoch, it, last_chk_it, change, profile_snap, sync=args.sync)
                         steps_since_checkp=1
+                        tstore += time.time()-chk_start
                     elif (cfreq > 0):
                         steps_since_checkp+=1
                 
@@ -497,8 +513,10 @@ def train(epoch, iteration, model, optimizer, train_sampler, train_loader, verbo
                             iter_dur = []
                             monitor_iter = 0 
                    
-
-            print("it: ", it, " time: ", time.time()-start, len(data))
+            it_time = time.time()-start
+            ttotal += it_time
+            print("it: ", it, " time: ", it_time, len(data))
+            logging.info("it: %s, ts: %s, total time: %.3f, store time: %.3f, load time: %.3f" % (it, time.time(), ttotal, tstore, tload))
             t.update(1)
             start = time.time()
             it += 1
