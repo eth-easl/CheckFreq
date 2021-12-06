@@ -104,6 +104,7 @@ args.cuda = not args.no_cuda and torch.cuda.is_available()
 
 pushpull_batch_size = args.batch_size * args.batches_per_pushpull
 
+
 class HybridTrainPipe(Pipeline):
     def __init__(self, batch_size, num_threads, device_id, data_dir, crop, dali_cpu=False, resume_index=0, resume_epoch=0):
         super(HybridTrainPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
@@ -283,10 +284,10 @@ def main():
 
     # BytePS: wrap optimizer with DistributedOptimizer.
 
-    #optimizer = bps.DistributedOptimizer(
-    #    optimizer, named_parameters=model.named_parameters(),
-    #    compression=compression,
-    #    backward_passes_per_step=args.batches_per_pushpull)
+    optimizer = bps.DistributedOptimizer(
+        optimizer, named_parameters=model.named_parameters(),
+        compression=compression,
+        backward_passes_per_step=args.batches_per_pushpull)
 
 
     # Restore from the latest (valid) checkpoint 
@@ -482,7 +483,7 @@ def train(epoch, tload, iteration, model, optimizer, train_sampler, train_loader
                     print("---------- Profile step: ", it)
                     iter_dur.append(time.time()-start)
 
-                elif (args.profile and not prof_done and it == args.prof_steps):
+                elif (args.profile and not prof_done and epoch==0 and it == args.prof_steps):
                     print("---------- Complete profiling")
                     mean_it_time, cfreq = do_prof(iter_dur,filepath, model, optimizer, additional_snapshot, chk, active_snapshot, \
                                     in_progress_snapshot, lock, epoch, it, last_chk_it, change, profile_snap)
@@ -501,7 +502,7 @@ def train(epoch, tload, iteration, model, optimizer, train_sampler, train_loader
                     elif (cfreq > 0):
                         steps_since_checkp+=1
                 
-                if args.profile and prof_done:
+                if args.profile and prof_done and epoch==0:
                     if not monitor:
                         monitor=True
                     if monitor and not skip_iter:
