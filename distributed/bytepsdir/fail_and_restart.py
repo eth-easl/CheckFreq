@@ -2,7 +2,7 @@ import ray
 import os
 import socket
 import time
-import run_byteps
+#import run_byteps
 
 all_nodes=4
 
@@ -16,17 +16,22 @@ nodes = set([n['NodeManagerAddress'] for n in nodes_info])
 local_hostname = socket.gethostbyname(socket.gethostname())
 nodes.remove(local_hostname)
 to_kill = list(nodes)[0]
-nodes.remove(to_kill)
+nnodes = 4
+#nodes.remove(to_kill)
 nodes.add(local_hostname)
 
-os.system("ssh -i /home/ubuntu/ray_bootstrap_key.pem  -o StrictHostKeyChecking=no ubuntu@" + to_kill + " docker kill byteps")
-os.system("ssh -i /home/ubuntu/ray_bootstrap_key.pem  -o StrictHostKeyChecking=no ubuntu@" + to_kill + " docker rm byteps")
+#os.system("ssh -i /home/ubuntu/ray_bootstrap_key.pem  -o StrictHostKeyChecking=no ubuntu@" + to_kill + " docker kill byteps")
+#os.system("ssh -i /home/ubuntu/ray_bootstrap_key.pem  -o StrictHostKeyChecking=no ubuntu@" + to_kill + " docker rm byteps")
 # TODO; node failure here
 
 print("node: " + to_kill +  " failed")
 for i in nodes:
     os.system("ssh -i /home/ubuntu/ray_bootstrap_key.pem  -o StrictHostKeyChecking=no ubuntu@" + i + " docker kill byteps")
     os.system("ssh -i /home/ubuntu/ray_bootstrap_key.pem  -o StrictHostKeyChecking=no ubuntu@" + i + " docker rm byteps")
+    for j in range(nnodes):
+        os.system("ssh -i /home/ubuntu/ray_bootstrap_key.pem  -o StrictHostKeyChecking=no ubuntu@" + i + " docker kill byteps" + str(j))
+        os.system("ssh -i /home/ubuntu/ray_bootstrap_key.pem  -o StrictHostKeyChecking=no ubuntu@" + i + " docker rm byteps" + str(j))
+
 
 print("all clear!")
 

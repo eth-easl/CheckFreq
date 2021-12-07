@@ -12,4 +12,6 @@ nodes.remove(driver_node_id)
 for x in nodes:
     print(x)
     cmd = 'scp -i /home/ubuntu/ray_bootstrap_key.pem -r /home/ubuntu/CheckFreq/distributed/bytepsdir ubuntu@' + x + ':/home/ubuntu/CheckFreq/distributed/'
+    #cmd = 'ssh -i /home/ubuntu/ray_bootstrap_key.pem ubuntu@' + x + ' mkdir ImageNet' 
+    # && gsutil -m cp  gs://imagenet-raw/val ImageNet'
     os.system(cmd)
