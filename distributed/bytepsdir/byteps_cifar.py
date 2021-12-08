@@ -220,12 +220,14 @@ def main():
         print("Use (CoorDL) Dali library")
         crop_size=224
         val_size = 256
-        pipe = HybridTrainPipe(batch_size=args.batch_size, num_threads=4, device_id=0, data_dir=args.train_dir, crop=crop_size, dali_cpu=0)
+        did = bps.rank() % 4 # nnodes
+        print("------- device id: ", did)
+        pipe = HybridTrainPipe(batch_size=args.batch_size, num_threads=4, device_id=did, data_dir=args.train_dir, crop=crop_size, dali_cpu=0)
         pipe.build()
         print("-------------- Reader size: ", pipe.epoch_size("Reader"))
         resume_size = int(pipe.epoch_size("Reader") / bps.size()) # TODO: change this in order to reload
         train_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / bps.size()), fill_last_batch=False, resume_size=resume_size)         
-        pipe_val = HybridValPipe(batch_size=args.batch_size, num_threads=4, device_id=0, data_dir=args.val_dir, crop=crop_size, size=val_size)
+        pipe_val = HybridValPipe(batch_size=args.batch_size, num_threads=4, device_id=did, data_dir=args.val_dir, crop=crop_size, size=val_size)
         pipe_val.build()
         val_loader = DALIClassificationIterator(pipe_val, size=int(pipe_val.epoch_size("Reader") / bps.size()))
         train_sampler = None
@@ -304,7 +306,7 @@ def main():
     if bps.rank() == 0:
         dirpath = '/datadrive/home/ubuntu/CheckFreq/distributed/bytepsdir/'
         files = filter( os.path.isfile, glob.glob(dirpath + '*.chk'))
-        files = sorted(files, key=os.path.getmtime)
+        files = sorted(files, key=os.path.getmtime) 
         if (len(files) > 0): 
            try:
               start_epoch, start_it = load_checkpoint(files[-1], model, optimizer)
@@ -516,14 +518,18 @@ def train(epoch, tload, iteration, model, optimizer, train_sampler, train_loader
                    
             it_time = time.time()-start
             ttotal += it_time
-            print("it: ", it, " time: ", it_time, len(data))
-            logging.info("it: %s, ts: %s, total time: %.3f, store time: %.3f, load time: %.3f" % (it, time.time(), ttotal, tstore, tload))
+            
+            if bps.rank() == 0:
+            	print("it: ", it, " time: ", it_time, len(data))
+            	logging.info("it: %s, ts: %s, total time: %.3f, store time: %.3f, load time: %.3f" % (it, time.time(), ttotal, tstore, tload))
             t.update(1)
             start = time.time()
             it += 1
 
+
         # do a synchronous checkpoint at the end of the epoch
-        save_checkpoint(filepath, model, optimizer, additional_snapshot, chk, active_snapshot, in_progress_snapshot, lock, \
+        if bps.rank() == 0:
+             save_checkpoint(filepath, model, optimizer, additional_snapshot, chk, active_snapshot, in_progress_snapshot, lock, \
                                     epoch, it, last_chk_it, change, profile_snap, sync=True)
         steps_since_checkp = 0
 

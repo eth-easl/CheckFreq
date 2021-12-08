@@ -220,12 +220,13 @@ def main():
         print("Use (CoorDL) Dali library")
         crop_size=224
         val_size = 256
-        pipe = HybridTrainPipe(batch_size=args.batch_size, num_threads=4, device_id=0, data_dir=args.train_dir, crop=crop_size, dali_cpu=0)
+        did = bps.rank() % 4 ## TODO: fix this to nnodes
+        pipe = HybridTrainPipe(batch_size=args.batch_size, num_threads=4, device_id=did, data_dir=args.train_dir, crop=crop_size, dali_cpu=0)
         pipe.build()
         print("-------------- Reader size: ", pipe.epoch_size("Reader"))
         resume_size = int(pipe.epoch_size("Reader") / bps.size()) # TODO: change this in order to reload
         train_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / bps.size()), fill_last_batch=False, resume_size=resume_size)         
-        pipe_val = HybridValPipe(batch_size=args.batch_size, num_threads=4, device_id=0, data_dir=args.val_dir, crop=crop_size, size=val_size)
+        pipe_val = HybridValPipe(batch_size=args.batch_size, num_threads=4, device_id=did, data_dir=args.val_dir, crop=crop_size, size=val_size)
         pipe_val.build()
         val_loader = DALIClassificationIterator(pipe_val, size=int(pipe_val.epoch_size("Reader") / bps.size()))
         train_sampler = None
@@ -523,9 +524,10 @@ def train(epoch, tload, iteration, model, optimizer, train_sampler, train_loader
             it += 1
 
         # do a synchronous checkpoint at the end of the epoch
-        save_checkpoint(filepath, model, optimizer, additional_snapshot, chk, active_snapshot, in_progress_snapshot, lock, \
+        if bps.rank()==0:
+              save_checkpoint(filepath, model, optimizer, additional_snapshot, chk, active_snapshot, in_progress_snapshot, lock, \
                                     epoch, it, last_chk_it, change, profile_snap, sync=True)
-        steps_since_checkp = 0
+              steps_since_checkp = 0
 
     if log_writer:
         log_writer.add_scalar('train/loss', train_loss.avg, epoch)
