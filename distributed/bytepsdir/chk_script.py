@@ -4,6 +4,7 @@ import torchvision.models as models
 import time
 from collections import OrderedDict
 import os
+import torch.nn.functional as F
 
 def _to_cpu(ele, snapshot=None):
    #while True:
@@ -60,19 +61,25 @@ def main():
 
    torch.cuda.set_device(0)
    arch = 'resnet50'
-   classes = 1000
+   classes = 10
    model = models.__dict__[arch](num_classes=classes)
-   model = model.cuda()
+   model.cuda()
 
-   # just an SGD optimizer
-   optimizer = torch.optim.SGD(model.parameters(), 0.1)
-   ts = []
-   tp = []
+   print(model.state_dict()['fc.bias'])
 
+   optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=0.00005)
+   for group in optimizer.param_groups:
+       for p in group['params']:
+           p.grad = p.data.new(p.size()).zero_()
+           #print(p.grad)
+   optimizer.step()
+   print(optimizer.state_dict())
    # warm-up
    for i in range(5):
      snap_and_persist(model, optimizer, 100+i)
-  
+   
+   ts = []
+   tp = []
    for i in range(100):
      stime, ptime = snap_and_persist(model, optimizer, i)
      ts.append(stime)
@@ -82,7 +89,7 @@ def main():
    
    print("--- snapshot: ", ts[50], ts[95])
    print('--- persist: ', tp[50], tp[95])
-
+   
 
 if __name__ == '__main__':
-    main()
+   main()
